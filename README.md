@@ -66,7 +66,7 @@ También puedes ejecutar una acción directamente:
 ./install.sh uninstall
 ```
 
-El binario se instala en `~/.local/bin/rustcraft` y los datos en `~/.local/share/RustCraft`.
+El binario se instala en `~/.local/bin/rustcraft` y los datos en `~/.local/share/RustCraft`. En Linux, el instalador también crea la entrada **RustCraft** en el menú de aplicaciones con su icono; al desinstalar, ambas se eliminan.
 
 ### Windows
 

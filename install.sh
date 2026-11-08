@@ -9,7 +9,10 @@ BIN="rustcraft"
 VERSION="${RUSTCRAFT_VERSION:-latest}"
 PREFIX="${RUSTCRAFT_PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
-DATA_DIR="${RUSTCRAFT_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/RustCraft}"
+XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+DATA_DIR="${RUSTCRAFT_DATA_DIR:-$XDG_DATA/RustCraft}"
+DESKTOP_DIR="$XDG_DATA/applications"
+ICON_DIR="$XDG_DATA/icons/hicolor/512x512/apps"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 ACTION=""
@@ -211,6 +214,89 @@ check_java() {
     fi
 }
 
+install_desktop_entry() {
+    [ "$OS" = "linux" ] || return 0
+
+    mkdir -p "$DESKTOP_DIR" || return 1
+
+    local icon_src=""
+    local icon_tmp=""
+    if [ -f "$SCRIPT_DIR/RustCraft.png" ]; then
+        icon_src="$SCRIPT_DIR/RustCraft.png"
+    else
+        icon_tmp="$(mktemp)"
+        if download "https://raw.githubusercontent.com/$REPO/main/RustCraft.png" "$icon_tmp" >/dev/null 2>&1; then
+            icon_src="$icon_tmp"
+        else
+            rm -f "$icon_tmp"
+            icon_tmp=""
+        fi
+    fi
+
+    if [ -n "$icon_src" ]; then
+        mkdir -p "$ICON_DIR" || return 1
+        install -m 644 "$icon_src" "$ICON_DIR/rustcraft.png" || return 1
+        if [ -n "$icon_tmp" ]; then
+            rm -f "$icon_tmp"
+        fi
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -f -t "$XDG_DATA/icons/hicolor" >/dev/null 2>&1 || true
+        fi
+    else
+        warn "no se pudo descargar el icono; se usará uno genérico"
+    fi
+
+    local exec_path="$BIN_DIR/$BIN"
+    exec_path="${exec_path//\\/\\\\}"
+    exec_path="${exec_path//\"/\\\"}"
+    exec_path="${exec_path//%/%%}"
+
+    cat > "$DESKTOP_DIR/rustcraft.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=RustCraft
+GenericName=Lanzador de Minecraft
+Comment=Lanzador offline para Horizon
+Exec="$exec_path"
+Icon=rustcraft
+Terminal=false
+Categories=Game;
+Keywords=minecraft;horizon;launcher;
+StartupNotify=true
+EOF
+    chmod 644 "$DESKTOP_DIR/rustcraft.desktop"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+    fi
+    ok "entrada añadida al menú de aplicaciones"
+}
+
+remove_desktop_entry() {
+    [ "$OS" = "linux" ] || return 0
+
+    local removed=0
+    if [ -f "$DESKTOP_DIR/rustcraft.desktop" ]; then
+        rm -f "$DESKTOP_DIR/rustcraft.desktop"
+        removed=1
+    fi
+    if [ -f "$ICON_DIR/rustcraft.png" ]; then
+        rm -f "$ICON_DIR/rustcraft.png"
+        removed=1
+    fi
+
+    if [ "$removed" -eq 1 ]; then
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+        fi
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -f -t "$XDG_DATA/icons/hicolor" >/dev/null 2>&1 || true
+        fi
+        ok "entrada del menú de aplicaciones eliminada"
+    fi
+}
+
 install_app() {
     mkdir -p "$BIN_DIR"
     if [ -n "$ASSET" ]; then
@@ -229,6 +315,9 @@ install_app() {
         build_from_source
     fi
     ensure_path
+    if ! install_desktop_entry; then
+        warn "no se pudo crear la entrada del menú de aplicaciones"
+    fi
     ok "RustCraft instalado en $BIN_DIR/$BIN"
     check_java
     printf '\nEjecuta: %srustcraft%s\n' "$YELLOW" "$RESET"
@@ -240,6 +329,8 @@ update_app() {
 }
 
 uninstall_app() {
+    remove_desktop_entry
+
     if [ -f "$BIN_DIR/$BIN" ]; then
         rm -f "$BIN_DIR/$BIN"
         ok "binario eliminado de $BIN_DIR/$BIN"
