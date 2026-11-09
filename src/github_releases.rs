@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::core::archive;
 use crate::core::download;
@@ -16,6 +16,8 @@ use crate::core::paths::AppPaths;
 pub const REPO: &str = "horizon-rust/horizon";
 pub const API_BASE: &str = "https://api.github.com/repos/horizon-rust/horizon";
 pub const DEFAULT_TAG: &str = "nightly";
+pub const LAUNCHER_REPO: &str = "jephersonRD/RustCraft";
+pub const LAUNCHER_API: &str = "https://api.github.com/repos/jephersonRD/RustCraft";
 const INSTALL_META: &str = "install.json";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
 
@@ -54,9 +56,9 @@ impl Platform {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Release {
     pub tag_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_string")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_string")]
     pub body: String,
     #[serde(default)]
     pub published_at: Option<String>,
@@ -64,6 +66,14 @@ pub struct Release {
     pub prerelease: bool,
     #[serde(default)]
     pub assets: Vec<Asset>,
+}
+
+/// GitHub returns `null` for some text fields on older releases.
+fn null_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -113,14 +123,102 @@ pub fn fetch_release(client: &Client, tag: &str) -> Result<Release> {
     download::fetch_json(client, &url)
 }
 
+/// Newest published RustCraft launcher release, if any.
+pub fn latest_launcher_release(client: &Client) -> Result<Release> {
+    let url = format!("{LAUNCHER_API}/releases/latest");
+    download::fetch_json(client, &url)
+}
+
+/// Asset name of the launcher binary for the current platform.
+pub fn launcher_asset_name() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("rustcraft-linux-x86_64"),
+        ("linux", "aarch64") => Some("rustcraft-linux-aarch64"),
+        ("macos", "aarch64") => Some("rustcraft-macos-arm64"),
+        ("macos", "x86_64") => Some("rustcraft-macos-x86_64"),
+        ("windows", "x86_64") => Some("rustcraft-windows-x64.exe"),
+        ("windows", "aarch64") => Some("rustcraft-windows-arm64.exe"),
+        _ => None,
+    }
+}
+
+/// Compare dotted versions, accepting an optional leading `v` and ignoring
+/// trailing non-numeric parts such as `-beta`.
+pub fn version_is_newer(current: &str, candidate: &str) -> bool {
+    fn parts(version: &str) -> Vec<u32> {
+        version
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| {
+                part.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+    let current = parts(current);
+    let candidate = parts(candidate);
+    let length = current.len().max(candidate.len());
+    for index in 0..length {
+        let old = current.get(index).copied().unwrap_or(0);
+        let new = candidate.get(index).copied().unwrap_or(0);
+        if new != old {
+            return new > old;
+        }
+    }
+    false
+}
+
 /// The game's releases, newest first. Launcher releases (`launcher@...`) are skipped.
+///
+/// GitHub returns at most 100 entries per page and launcher releases are frequent,
+/// so several pages are walked until `limit` game releases are collected.
 pub fn list_releases(client: &Client, limit: usize) -> Result<Vec<Release>> {
-    let url = format!("{API_BASE}/releases?per_page={limit}");
-    let releases: Vec<Release> = download::fetch_json(client, &url)?;
-    Ok(releases
-        .into_iter()
-        .filter(|release| is_game_tag(&release.tag_name))
-        .collect())
+    let mut releases = Vec::new();
+    let mut page = 1;
+    while releases.len() < limit && page <= 10 {
+        let url = format!(
+            "{API_BASE}/releases?per_page=100&page={page}"
+        );
+        let batch: Vec<Release> = download::fetch_json(client, &url)?;
+        if batch.is_empty() {
+            break;
+        }
+        let received = batch.len();
+        releases.extend(
+            batch
+                .into_iter()
+                .filter(|release| is_game_tag(&release.tag_name)),
+        );
+        if received < 100 {
+            break;
+        }
+        page += 1;
+    }
+    releases.truncate(limit);
+    Ok(releases)
+}
+
+/// Delete an installed Horizon version and its cached archive.
+pub fn remove_installed(paths: &AppPaths, tag: &str) -> Result<()> {
+    validate_tag(tag)?;
+    let version_dir = paths.version_dir(tag);
+    let meta = read_install_meta(&version_dir);
+    if version_dir.exists() {
+        fs::remove_dir_all(&version_dir).map_err(|e| {
+            Error::io(
+                format!("could not remove {}", version_dir.display()),
+                e,
+            )
+        })?;
+    }
+    if let Some(meta) = meta {
+        let _ = fs::remove_file(paths.downloads_cache_dir().join(meta.asset));
+    }
+    Ok(())
 }
 
 pub fn install_release(
@@ -355,6 +453,15 @@ not-a-hash  ignored.bin
             "b692ae851d9db2edffb6aff89901b379f70417fe0d756c57dfb5746484814ae6"
         );
         assert!(sums.get("ignored.bin").is_none());
+    }
+
+    #[test]
+    fn launcher_versions_are_compared() {
+        assert!(version_is_newer("0.1.0", "v0.1.1"));
+        assert!(version_is_newer("0.1.1", "v0.2.0"));
+        assert!(!version_is_newer("0.1.1", "v0.1.1"));
+        assert!(!version_is_newer("0.2.0", "v0.1.9"));
+        assert!(!version_is_newer("0.1.1", "basura"));
     }
 
     #[test]

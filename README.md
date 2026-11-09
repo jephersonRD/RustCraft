@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jephersonRD/RustCraft/releases"><img src="https://img.shields.io/badge/versi%C3%B3n-0.1.0-f7c614?style=flat-square" alt="Versión"></a>
+  <a href="https://github.com/jephersonRD/RustCraft/releases"><img src="https://img.shields.io/badge/versi%C3%B3n-0.1.1-f7c614?style=flat-square" alt="Versión"></a>
   <img src="https://img.shields.io/badge/Minecraft-26.3-3dc75b?style=flat-square" alt="Minecraft 26.3">
   <img src="https://img.shields.io/badge/Java-25-e76f00?style=flat-square" alt="Java 25">
   <img src="https://img.shields.io/badge/licencia-MIT-4c8bf5?style=flat-square" alt="MIT">
@@ -26,15 +26,17 @@
 - Descarga los archivos oficiales de Minecraft desde Mojang y comprueba cada SHA-1.
 - Prepara los recursos del juego con `horizon-prepare` y Java 25.
 - Crea instancias independientes con sus propios mundos y ajustes.
+- Muestra todas las versiones de Horizon con su nombre, etiqueta, fecha y peso, y permite instalar o eliminar cada una por separado.
+- Avisa cuando hay una nueva versión de RustCraft y permite actualizar desde la propia app, o posponerlo y seguir jugando.
 - Te deja jugar con un **nombre offline** y un UUID estable, sin login.
 
-La interfaz está pensada para no pedirte nada más que un nombre la primera vez. El resto se hace desde **Biblioteca**.
+La interfaz está pensada para no pedirte nada más que un nombre la primera vez. El resto se hace desde **Biblioteca**. Incluye transiciones suaves, barras de progreso animadas y listas desplazables.
 
 ## Compatibilidad
 
 | Componente | Versión |
 | --- | --- |
-| RustCraft | 0.1.0 |
+| RustCraft | 0.1.1 |
 | Horizon | `nightly` y releases compatibles |
 | Minecraft Java Edition | **26.3** |
 | Java runtime | **25** |
@@ -66,7 +68,7 @@ También puedes ejecutar una acción directamente:
 ./install.sh uninstall
 ```
 
-El binario se instala en `~/.local/bin/rustcraft` y los datos en `~/.local/share/RustCraft`. En Linux, el instalador también crea la entrada **RustCraft** en el menú de aplicaciones con su icono; al desinstalar, ambas se eliminan.
+El binario se instala en `~/.local/bin/rustcraft` y los datos en `~/.local/share/RustCraft`. En Linux, el instalador también crea la entrada **RustCraft** en el menú de aplicaciones con su icono y, si falta Java 25 o superior, ofrece instalarlo automáticamente con el gestor de paquetes de tu distribución; al desinstalar, la entrada y el icono se eliminan.
 
 ### Windows
 
@@ -88,6 +90,13 @@ O directamente una acción:
 El binario se instala en `%LOCALAPPDATA%\RustCraft\bin` y los datos en `%APPDATA%\RustCraft`.
 
 > Si no existe un binario precompilado para tu plataforma, el script compila desde el código fuente usando Cargo. Necesitarás [Rust](https://rustup.rs) en ese caso.
+
+## Actualizaciones
+
+Al abrir RustCraft se consulta la última release del repositorio. Si hay una versión nueva aparece un aviso con dos opciones:
+
+- **Actualizar**: descarga el binario de tu plataforma, muestra la barra de progreso y lo instala automáticamente.
+- **Ahora no**: cierra el aviso y puedes seguir usando el launcher y jugando sin actualizar.
 
 ## Primeros pasos
 
@@ -178,7 +187,7 @@ src/
 
 ## Problemas frecuentes
 
-**No aparece Java 25.** RustCraft necesita Java 25 para `horizon-prepare`. El instalador detecta tu distribución y te muestra el comando adecuado; también puedes instalar [Temurin 25](https://adoptium.net).
+**No aparece Java 25.** RustCraft necesita Java 25 o superior para `horizon-prepare`. El instalador ofrece instalar el JRE con el gestor de paquetes de tu distribución; si prefieres hacerlo a mano, también puedes instalar [Temurin 25](https://adoptium.net).
 
 **La preparación falla o faltan recursos.** Vuelve a ejecutar `rustcraft prepare --force`. Si el problema continúa, revisa que la descarga de Mojang haya terminado correctamente.
 

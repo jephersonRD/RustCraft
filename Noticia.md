@@ -1,5 +1,11 @@
 # Noticias de RustCraft
 
+## RustCraft 0.1.1: biblioteca completa y más animaciones
+
+_8 de noviembre de 2026_
+
+RustCraft 0.1.1 muestra todas las versiones de Horizon, con nombre, etiqueta, fecha y peso descargable. Puedes instalar la versión que quieras y eliminar las que ya no uses. Las noticias ya no desbordan su tarjeta, y la interfaz estrena transiciones, barras de progreso animadas y listas con desplazamiento. El instalador ahora ofrece instalar Java 25 automáticamente con el gestor de paquetes del sistema. Además, la app avisa cuando hay una versión nueva de RustCraft: puedes actualizar desde la propia ventana con barra de progreso o elegir «Ahora no» y seguir jugando.
+
 ## RustCraft 0.1.0 ya está disponible
 
 _8 de noviembre de 2026_

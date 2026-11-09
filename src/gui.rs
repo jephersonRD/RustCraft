@@ -3,14 +3,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Shape,
-    Stroke, TextureHandle, TextureOptions, Vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Pos2, Rect,
+    RichText, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2,
 };
 
 use crate::accounts_offline::OfflineAccount;
 use crate::core::config::{Config, WindowConfig};
 use crate::core::download;
-use crate::core::error::Result as RcResult;
+use crate::core::error::{Error as RcError, Result as RcResult};
 use crate::core::paths::AppPaths;
 use crate::github_releases::{self, InstallEvent, InstallResult, Platform, Release};
 use crate::instances::{self, Instance};
@@ -44,6 +44,7 @@ enum TaskKind {
     Install(String),
     Prepare(String),
     Play(String),
+    Update,
 }
 
 #[derive(Clone)]
@@ -67,6 +68,7 @@ enum Msg {
     Bytes { label: String, downloaded: u64, total: u64 },
     Remote(Vec<Release>),
     News(Vec<NewsItem>),
+    Update(Option<Release>),
     Done(std::result::Result<String, String>),
 }
 
@@ -95,6 +97,13 @@ pub struct RustCraftApp {
     task: Option<Task>,
     logo: Option<TextureHandle>,
     background: Option<TextureHandle>,
+    delete_target: Option<String>,
+    display_progress: Option<f32>,
+    last_time: f64,
+    boot_time: f64,
+    available_update: Option<Release>,
+    update_dialog: bool,
+    update_dismissed: bool,
 }
 
 impl RustCraftApp {
@@ -152,7 +161,17 @@ impl RustCraftApp {
             task: None,
             logo,
             background,
+            delete_target: None,
+            display_progress: None,
+            last_time: 0.0,
+            boot_time: -1.0,
+            available_update: None,
+            update_dialog: false,
+            update_dismissed: false,
         };
+        cc.egui_ctx.style_mut(|style| {
+            style.animation_time = 0.18;
+        });
         app.refresh();
         app.spawn_releases(&cc.egui_ctx);
         app
@@ -219,7 +238,23 @@ impl RustCraftApp {
                 Msg::News(items) => {
                     self.news = items;
                 }
+                Msg::Update(release) => {
+                    if !self.update_dismissed {
+                        if let Some(release) = release {
+                            self.available_update = Some(release);
+                            self.update_dialog = true;
+                        }
+                    }
+                }
                 Msg::Done(result) => {
+                    let updating = matches!(
+                        self.task.as_ref(),
+                        Some(Task {
+                            kind: TaskKind::Update,
+                            ..
+                        })
+                    );
+                    let ok = result.is_ok();
                     match result {
                         Ok(message) => {
                             self.status = message;
@@ -229,6 +264,11 @@ impl RustCraftApp {
                             self.status = error.clone();
                             self.log(format!("error: {error}"));
                         }
+                    }
+                    if updating && ok {
+                        self.available_update = None;
+                        self.update_dialog = false;
+                        self.update_dismissed = true;
                     }
                     self.bytes_note = None;
                     self.task = None;
@@ -251,8 +291,16 @@ impl RustCraftApp {
             let client = download::client();
             match client {
                 Ok(client) => {
+                    if let Ok(release) = github_releases::latest_launcher_release(&client) {
+                        if github_releases::version_is_newer(
+                            env!("CARGO_PKG_VERSION"),
+                            &release.tag_name,
+                        ) {
+                            let _ = tx.send(Msg::Update(Some(release)));
+                        }
+                    }
                     let releases =
-                        github_releases::list_releases(&client, 30).unwrap_or_default();
+                        github_releases::list_releases(&client, 500).unwrap_or_default();
                     let _ = tx.send(Msg::Remote(releases));
                     match download::fetch_text(&client, NEWS_URL) {
                         Ok(text) => {
@@ -339,6 +387,70 @@ impl RustCraftApp {
         self.logs.clear();
     }
 
+    fn spawn_update(&mut self, ctx: &egui::Context, release: Release) {
+        if self.busy() {
+            self.status = "espera a que termine la tarea actual para actualizar".into();
+            return;
+        }
+        let Some(asset_name) = github_releases::launcher_asset_name() else {
+            self.status = "esta plataforma no tiene binario de actualización".into();
+            return;
+        };
+        let Some(asset) = release.asset(asset_name) else {
+            self.status = format!("la versión {} no incluye {asset_name}", release.tag_name);
+            return;
+        };
+        let tag = release.tag_name.clone();
+        let url = asset.browser_download_url.clone();
+        let thread_tag = tag.clone();
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> RcResult<String> {
+                let client = download::client()?;
+                let current = std::env::current_exe().map_err(|error| {
+                    RcError::io("could not locate the running executable", error)
+                })?;
+                let file_name = current
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("rustcraft");
+                let temp = current.with_file_name(format!(".{file_name}.update"));
+                let cancel = AtomicBool::new(false);
+                let progress_tx = tx.clone();
+                let progress_ctx = ctx.clone();
+                download::download(&client, &url, &temp, None, &cancel, |downloaded, total| {
+                    if let Some(total) = total.filter(|total| *total > 0) {
+                        let _ = progress_tx.send(Msg::Progress(downloaded as f32 / total as f32));
+                        let _ = progress_tx.send(Msg::Bytes {
+                            label: format!("RustCraft {thread_tag}"),
+                            downloaded,
+                            total,
+                        });
+                        progress_ctx.request_repaint();
+                    }
+                })?;
+                install_binary(&temp, &current)?;
+                Ok(format!(
+                    "RustCraft {thread_tag} instalado. Cierra y vuelve a abrir RustCraft para usar la nueva versión."
+                ))
+            })();
+            let _ = match result {
+                Ok(message) => tx.send(Msg::Done(Ok(message))),
+                Err(error) => tx.send(Msg::Done(Err(format!("{error}")))),
+            };
+            ctx.request_repaint();
+        });
+        self.task = Some(Task {
+            kind: TaskKind::Update,
+            rx,
+        });
+        self.progress = Some(0.0);
+        self.status = format!("actualizando RustCraft a {tag}");
+        self.bytes_note = None;
+        self.logs.clear();
+    }
+
     fn spawn_prepare(&mut self, ctx: &egui::Context, tag: String) {
         if self.busy() {
             return;
@@ -350,67 +462,12 @@ impl RustCraftApp {
         let java_home = self.config.java_home.clone();
         std::thread::spawn(move || {
             let result = (|| -> RcResult<String> {
-                let api = prepare::launch_api(&paths, &thread_tag)?;
-                if !prepare::minecraft_ready(&paths, &api.minecraft) {
-                    let client = download::client()?;
-                    let cancel = AtomicBool::new(false);
-                    let progress_tx = tx.clone();
-                    let progress_ctx = ctx.clone();
-                    mojang::install(&client, &paths, &api.minecraft, &cancel, |event| {
-                        match event {
-                            MojangProgress::Message(message) => {
-                                let _ = progress_tx.send(Msg::Log(message));
-                            }
-                            MojangProgress::Download {
-                                label,
-                                downloaded,
-                                total,
-                            } => {
-                                if let Some(total) = total.filter(|total| *total > 0) {
-                                    let _ = progress_tx.send(Msg::Bytes {
-                                        label: label.to_owned(),
-                                        downloaded,
-                                        total,
-                                    });
-                                }
-                            }
-                            MojangProgress::Files {
-                                label,
-                                done,
-                                total,
-                            } => {
-                                if total > 0 {
-                                    let _ = progress_tx.send(Msg::Log(format!(
-                                        "{label}: {}%",
-                                        done * 100 / total
-                                    )));
-                                }
-                            }
-                        }
-                    })?;
-                    progress_ctx.request_repaint();
-                }
-
-                let cancel = AtomicBool::new(false);
-                let progress_tx = tx.clone();
-                let progress_ctx = ctx.clone();
-                let prepared = prepare::prepare(
+                let prepared = prepare_version(
                     &paths,
                     &thread_tag,
                     java_home.as_deref(),
-                    &cancel,
-                    |event| match event {
-                        PrepareProgress::Message(message) => {
-                            let _ = progress_tx.send(Msg::Log(message));
-                        }
-                        PrepareProgress::Log(line) => {
-                            let _ = progress_tx.send(Msg::Log(line));
-                        }
-                        PrepareProgress::Fraction(fraction) => {
-                            let _ = progress_tx.send(Msg::Progress(fraction));
-                            progress_ctx.request_repaint();
-                        }
-                    },
+                    &tx,
+                    &ctx,
                 )?;
                 Ok(format!("recursos listos en {}", prepared.output.display()))
             })();
@@ -430,6 +487,22 @@ impl RustCraftApp {
         self.logs.clear();
     }
 
+    fn playable_version(&self, instance: &Instance) -> Option<String> {
+        let installed = |tag: &str| self.versions.iter().any(|v| v.meta.tag == tag);
+        if let Some(tag) = self
+            .config
+            .selected_version
+            .as_deref()
+            .filter(|tag| installed(tag))
+        {
+            return Some(tag.to_owned());
+        }
+        if installed(&instance.version_tag) {
+            return Some(instance.version_tag.clone());
+        }
+        self.versions.first().map(|version| version.meta.tag.clone())
+    }
+
     fn spawn_play(&mut self, ctx: &egui::Context, instance: &Instance) {
         if self.busy() {
             return;
@@ -443,32 +516,61 @@ impl RustCraftApp {
                 return;
             }
         };
+        let Some(version_tag) = self.playable_version(instance) else {
+            self.status = "no hay ninguna versión instalada; instala una en Biblioteca".into();
+            return;
+        };
+
+        let mut instance = instance.clone();
+        if instance.version_tag != version_tag {
+            instance.version_tag = version_tag.clone();
+            if let Err(error) = instance.save(&self.paths) {
+                self.status = format!("no se pudo actualizar la instancia: {error}");
+                return;
+            }
+        }
+        self.config.selected_version = Some(version_tag.clone());
+        let _ = self.config.save(&self.paths.config_file());
+
         let (tx, rx) = mpsc::channel();
         let paths = self.paths.clone();
-        let instance = instance.clone();
         let ctx = ctx.clone();
+        let java_home = self.config.java_home.clone();
         let width = self.width_input.clamp(320, 7680);
         let height = self.height_input.clamp(240, 4320);
         let label = instance.name.clone();
         let instance_id = instance.id.clone();
         let instance_name = instance.name.clone();
+        let thread_tag = version_tag.clone();
         std::thread::spawn(move || {
-            let cancel = AtomicBool::new(false);
-            let log_tx = tx.clone();
-            let result = launch::run(
-                &paths,
-                &instance,
-                &account,
-                width,
-                height,
-                &cancel,
-                |event| {
-                    let line = match event {
-                        launch::Event::Stdout(line) | launch::Event::Stderr(line) => line,
-                    };
-                    let _ = log_tx.send(Msg::Log(line));
-                },
-            );
+            let result = (|| -> RcResult<launch::Outcome> {
+                let check = prepare::check(&paths, &thread_tag)?;
+                if !check.ok {
+                    prepare_version(
+                        &paths,
+                        &thread_tag,
+                        java_home.as_deref(),
+                        &tx,
+                        &ctx,
+                    )?;
+                }
+                let cancel = AtomicBool::new(false);
+                let log_tx = tx.clone();
+                launch::run(
+                    &paths,
+                    &instance,
+                    &account,
+                    width,
+                    height,
+                    &cancel,
+                    |event| {
+                        let line = match event {
+                            launch::Event::Stdout(line) | launch::Event::Stderr(line) => line,
+                        };
+                        let _ = log_tx.send(Msg::Log(line));
+                    },
+                )
+            })();
             let _ = match result {
                 Ok(outcome) => {
                     let mut message = format!("{} cerró con código {}", label, outcome.code);
@@ -485,10 +587,10 @@ impl RustCraftApp {
             kind: TaskKind::Play(instance_id),
             rx,
         });
-        self.status = format!("abriendo {instance_name}");
+        self.status = format!("preparando y abriendo {instance_name}");
         self.logs.clear();
         self.bytes_note = None;
-        self.progress = None;
+        self.progress = Some(0.0);
     }
 
     fn save_settings(&mut self) {
@@ -553,9 +655,90 @@ impl RustCraftApp {
     }
 }
 
+fn prepare_version(
+    paths: &AppPaths,
+    tag: &str,
+    java_home: Option<&Path>,
+    tx: &mpsc::Sender<Msg>,
+    ctx: &egui::Context,
+) -> RcResult<prepare::Prepared> {
+    let api = prepare::launch_api(paths, tag)?;
+    if !prepare::minecraft_ready(paths, &api.minecraft) {
+        let client = download::client()?;
+        let cancel = AtomicBool::new(false);
+        let progress_tx = tx.clone();
+        let progress_ctx = ctx.clone();
+        mojang::install(&client, paths, &api.minecraft, &cancel, |event| {
+            match event {
+                MojangProgress::Message(message) => {
+                    let _ = progress_tx.send(Msg::Log(message));
+                }
+                MojangProgress::Download {
+                    label,
+                    downloaded,
+                    total,
+                } => {
+                    if let Some(total) = total.filter(|total| *total > 0) {
+                        let _ = progress_tx.send(Msg::Bytes {
+                            label: label.to_owned(),
+                            downloaded,
+                            total,
+                        });
+                    }
+                }
+                MojangProgress::Files {
+                    label,
+                    done,
+                    total,
+                } => {
+                    if total > 0 {
+                        let _ = progress_tx.send(Msg::Log(format!(
+                            "{label}: {}%",
+                            done * 100 / total
+                        )));
+                    }
+                }
+            }
+        })?;
+        progress_ctx.request_repaint();
+    }
+
+    let cancel = AtomicBool::new(false);
+    let progress_tx = tx.clone();
+    let progress_ctx = ctx.clone();
+    prepare::prepare(paths, tag, java_home, &cancel, |event| match event {
+        PrepareProgress::Message(message) => {
+            let _ = progress_tx.send(Msg::Log(message));
+        }
+        PrepareProgress::Log(line) => {
+            let _ = progress_tx.send(Msg::Log(line));
+        }
+        PrepareProgress::Fraction(fraction) => {
+            let _ = progress_tx.send(Msg::Progress(fraction));
+            progress_ctx.request_repaint();
+        }
+    })
+}
+
 impl eframe::App for RustCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = ctx.input(|input| input.time);
+        if self.boot_time < 0.0 {
+            self.boot_time = now;
+            self.last_time = now;
+        }
+        let dt = (now - self.last_time).clamp(0.0, 0.1);
+        self.last_time = now;
+
         self.poll_task(ctx);
+
+        if let Some(target) = self.progress {
+            let current = self.display_progress.unwrap_or(0.0);
+            let next = current + (target - current) * (1.0 - (-dt * 12.0).exp()) as f32;
+            self.display_progress = Some(next);
+        } else {
+            self.display_progress = None;
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG))
@@ -602,6 +785,14 @@ impl eframe::App for RustCraftApp {
                 } else if self.account_dialog {
                     self.paint_account_dialog(ui, full, false);
                 }
+
+                if self.delete_target.is_some() {
+                    self.paint_delete_dialog(ui, full);
+                }
+
+                if self.update_dialog {
+                    self.paint_update_dialog(ui, full);
+                }
             });
     }
 }
@@ -644,6 +835,9 @@ impl RustCraftApp {
     }
 
     fn paint_sidebar(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let now = ui.input(|input| input.time) as f32;
+        let boot = (((now as f64 - self.boot_time) / 0.45).clamp(0.0, 1.0)) as f32;
+        let boot = 1.0 - (1.0 - boot).powi(3);
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::ZERO, SIDEBAR);
         painter.rect_filled(
@@ -655,14 +849,14 @@ impl RustCraftApp {
         if let Some(logo) = &self.logo {
             let size = 92.0;
             let logo_rect = Rect::from_center_size(
-                Pos2::new(rect.center().x, rect.min.y + 100.0),
+                Pos2::new(rect.center().x, rect.min.y + 100.0 + (1.0 - boot) * 10.0),
                 Vec2::splat(size),
             );
             painter.image(
                 logo.id(),
                 logo_rect,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
+                Color32::WHITE.gamma_multiply(boot),
             );
         }
 
@@ -674,14 +868,14 @@ impl RustCraftApp {
             Align2::LEFT_CENTER,
             "Rust",
             title_font.clone(),
-            TEXT,
+            TEXT.gamma_multiply(boot),
         );
         painter.text(
             Pos2::new(title_x + galley.size().x, rect.min.y + 168.0),
             Align2::RIGHT_CENTER,
             "Craft",
             title_font,
-            YELLOW,
+            YELLOW.gamma_multiply(boot),
         );
 
         let items = [
@@ -699,14 +893,31 @@ impl RustCraftApp {
             let response = ui.interact(item, ui.id().with(("nav", index)), Sense::click());
             let active = self.page == page;
             let hovered = response.hovered();
-            if active {
-                ui.painter()
-                    .rect_filled(item, CornerRadius::same(16), YELLOW);
-            } else if hovered {
-                ui.painter()
-                    .rect_filled(item, CornerRadius::same(16), CARD_SOFT);
+            let active_t = ui.ctx().animate_bool_with_time(
+                ui.id().with(("nav-active", index)),
+                active,
+                0.16,
+            );
+            let hover_t = ui.ctx().animate_bool_with_time(
+                ui.id().with(("nav-hover", index)),
+                hovered && !active,
+                0.12,
+            );
+            if hover_t > 0.0 {
+                ui.painter().rect_filled(
+                    item,
+                    CornerRadius::same(16),
+                    CARD_SOFT.gamma_multiply(hover_t),
+                );
             }
-            let color = if active { Color32::BLACK } else { TEXT };
+            if active_t > 0.0 {
+                ui.painter().rect_filled(
+                    item,
+                    CornerRadius::same(16),
+                    YELLOW.gamma_multiply(active_t),
+                );
+            }
+            let color = lerp_color(TEXT, Color32::BLACK, active_t);
             let icon_center = Pos2::new(item.min.x + 30.0, item.center().y);
             if icon == 2 {
                 ui.painter().text(
@@ -733,9 +944,14 @@ impl RustCraftApp {
 
         let bottom = rect.max.y - 46.0;
         let color = if self.busy() { YELLOW } else { GREEN };
+        let pulse = if self.busy() {
+            1.0 + ((now * 3.2).sin() * 0.5 + 0.5) * 0.45
+        } else {
+            1.0
+        };
         ui.painter().circle_filled(
             Pos2::new(rect.min.x + 34.0, bottom),
-            5.0,
+            5.0 * pulse,
             color,
         );
         ui.painter().text(
@@ -766,12 +982,16 @@ impl RustCraftApp {
                 size,
             );
             let response = ui.interact(rect, ui.id().with(("window", index)), Sense::click());
-            let color = if response.hovered() {
-                if index == 2 { RED } else { CARD_SOFT }
-            } else {
-                Color32::TRANSPARENT
-            };
-            ui.painter().rect_filled(rect, CornerRadius::same(8), color);
+            let hover_t = ui.ctx().animate_bool_with_time(
+                ui.id().with(("window-hover", index)),
+                response.hovered(),
+                0.12,
+            );
+            if hover_t > 0.0 {
+                let base = if index == 2 { RED } else { CARD_SOFT };
+                ui.painter()
+                    .rect_filled(rect, CornerRadius::same(8), base.gamma_multiply(hover_t));
+            }
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -799,43 +1019,64 @@ impl RustCraftApp {
     fn paint_content(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let top = Pos2::new(rect.min.x, rect.min.y + 30.0);
         let account = self.name_input.trim().to_owned();
+        let has_account = !account.is_empty();
         let (account_label, account_color) = if account.is_empty() {
             ("Sin cuenta".to_owned(), RED)
         } else {
             (account, TEXT)
         };
-        let chip_width = 172.0;
-        let chip = Rect::from_min_size(
-            Pos2::new(rect.max.x - chip_width, top.y),
-            Vec2::new(chip_width, 42.0),
+        let hover_rect = Rect::from_min_max(
+            Pos2::new(rect.max.x - 260.0, top.y - 6.0),
+            Pos2::new(rect.max.x, top.y + 42.0),
         );
-        ui.painter()
-            .rect_filled(chip, CornerRadius::same(21), Color32::from_rgb(32, 29, 35));
-        let chip_response = ui.interact(chip, ui.id().with("account-chip"), Sense::click());
-        ui.painter().circle_filled(
-            Pos2::new(chip.min.x + 22.0, chip.center().y),
-            10.0,
-            CARD_SOFT,
-        );
-        ui.painter().circle_filled(
-            Pos2::new(chip.min.x + 22.0, chip.center().y - 3.0),
-            4.0,
-            TEXT,
-        );
+        let chip_response = ui.interact(hover_rect, ui.id().with("account-chip"), Sense::click());
+        let hover_t = ui
+            .ctx()
+            .animate_bool_with_time(ui.id().with("account-hover"), chip_response.hovered(), 0.14);
+
+        let avatar = Pos2::new(rect.max.x - 24.0, top.y + 21.0);
+        let avatar_fill = if has_account {
+            YELLOW
+        } else {
+            CARD_SOFT
+        };
+        ui.painter().circle_filled(avatar, 17.0, avatar_fill);
+        let initial = if has_account {
+            account_label
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".to_owned())
+        } else {
+            "?".to_owned()
+        };
         ui.painter().text(
-            Pos2::new(chip.min.x + 42.0, chip.center().y),
-            Align2::LEFT_CENTER,
-            account_label,
-            FontId::proportional(15.0),
+            avatar,
+            Align2::CENTER_CENTER,
+            initial,
+            FontId::proportional(16.0),
+            if has_account { Color32::BLACK } else { MUTED },
+        );
+
+        let name_right = avatar.x - 34.0;
+        let name_font = FontId::proportional(16.0);
+        let name_galley = ui.painter().layout_no_wrap(
+            truncate(&account_label, 22),
+            name_font,
             account_color,
         );
-        ui.painter().text(
-            Pos2::new(chip.max.x - 18.0, chip.center().y),
-            Align2::CENTER_CENTER,
-            "▾",
-            FontId::proportional(13.0),
-            MUTED,
-        );
+        let name_pos = Pos2::new(name_right - name_galley.size().x, top.y + 21.0);
+        ui.painter().galley(name_pos, name_galley, account_color);
+        if hover_t > 0.0 {
+            let line_y = top.y + 38.0;
+            ui.painter().line_segment(
+                [
+                    Pos2::new(name_pos.x, line_y),
+                    Pos2::new(name_right, line_y),
+                ],
+                Stroke::new(1.5_f32, YELLOW.gamma_multiply(hover_t)),
+            );
+        }
         if chip_response.clicked() && !self.onboarding {
             self.dialog_text = self.name_input.clone();
             self.account_dialog = true;
@@ -888,6 +1129,23 @@ impl RustCraftApp {
             && has_account
             && !self.onboarding;
         let play_fill = if enabled { YELLOW } else { Color32::from_rgb(120, 100, 20) };
+        let play_hover = ui.ctx().animate_bool_with_time(
+            ui.id().with("play-hover"),
+            enabled && ui.rect_contains_pointer(play_rect),
+            0.14,
+        );
+        if enabled {
+            let glow = Rect::from_center_size(
+                play_rect.center(),
+                play_rect.size() + Vec2::splat(14.0 + play_hover * 6.0),
+            );
+            ui.painter().rect_filled(
+                glow,
+                CornerRadius::same(22),
+                YELLOW.gamma_multiply(0.10 + play_hover * 0.10),
+            );
+        }
+        let play_fill = lerp_color(play_fill, Color32::from_rgb(255, 219, 74), play_hover);
         let play = ui.put(
             play_rect,
             egui::Button::new(
@@ -985,32 +1243,41 @@ impl RustCraftApp {
                 String::new(),
             )
         };
-        // Keep every text inside the card: clip to its inner rect.
+        // Every text stays inside the card: wrap it and clip the galley to the inner rect.
         let text_rect = Rect::from_min_max(
-            Pos2::new(news_rect.min.x + 22.0, news_rect.min.y + 64.0),
-            Pos2::new(news_rect.max.x - 22.0, news_rect.max.y - 30.0),
+            Pos2::new(news_rect.min.x + 22.0, news_rect.min.y + 62.0),
+            Pos2::new(news_rect.max.x - 22.0, news_rect.max.y - 38.0),
         );
-        ui.painter()
-            .with_clip_rect(text_rect)
-            .text(
-                Pos2::new(text_rect.min.x, text_rect.min.y),
-                Align2::LEFT_TOP,
-                headline,
-                FontId::proportional(19.0),
-                TEXT,
-            );
-        ui.painter()
-            .with_clip_rect(text_rect)
-            .text(
-                Pos2::new(text_rect.min.x, text_rect.min.y + 28.0),
-                Align2::LEFT_TOP,
-                body,
-                FontId::proportional(15.0),
+        let painter = ui.painter().with_clip_rect(text_rect);
+        let title_font = FontId::proportional(if compact { 17.0 } else { 19.0 });
+        let (title_galley, _) = fit_wrapped(
+            &painter,
+            &headline,
+            title_font,
+            TEXT,
+            text_rect.width(),
+            if compact { 42.0 } else { 50.0 },
+        );
+        let title_height = title_galley.size().y;
+        painter.galley(text_rect.min, title_galley, TEXT);
+
+        let body_top = text_rect.min.y + title_height + 8.0;
+        let body_height = (text_rect.max.y - body_top).max(0.0);
+        if body_height > 12.0 {
+            let (body_galley, _) = fit_wrapped(
+                &painter,
+                &body,
+                FontId::proportional(if compact { 13.5 } else { 15.0 }),
                 MUTED,
+                text_rect.width(),
+                body_height,
             );
+            painter.galley(Pos2::new(text_rect.min.x, body_top), body_galley, MUTED);
+        }
+
         if !self.versions.is_empty() {
             ui.painter().text(
-                Pos2::new(text_rect.min.x, news_rect.max.y - 24.0),
+                Pos2::new(news_rect.min.x + 22.0, news_rect.max.y - 20.0),
                 Align2::LEFT_CENTER,
                 format!(
                     "{} versiones instaladas · {} instancias",
@@ -1023,7 +1290,7 @@ impl RustCraftApp {
         }
         if !date.is_empty() {
             ui.painter().text(
-                Pos2::new(news_rect.max.x - 22.0, news_rect.max.y - 24.0),
+                Pos2::new(news_rect.max.x - 22.0, news_rect.max.y - 20.0),
                 Align2::RIGHT_CENTER,
                 date,
                 FontId::proportional(12.0),
@@ -1067,9 +1334,17 @@ impl RustCraftApp {
                 );
                 let response =
                     ui.interact(row, ui.id().with(("quick", index)), Sense::click());
-                if response.hovered() {
-                    ui.painter()
-                        .rect_filled(row, CornerRadius::same(10), CARD_SOFT);
+                let hover_t = ui.ctx().animate_bool_with_time(
+                    ui.id().with(("quick-hover", index)),
+                    response.hovered(),
+                    0.12,
+                );
+                if hover_t > 0.0 {
+                    ui.painter().rect_filled(
+                        row,
+                        CornerRadius::same(10),
+                        CARD_SOFT.gamma_multiply(hover_t),
+                    );
                 }
                 let icon_center = Pos2::new(row.min.x + 16.0, row.center().y);
                 if icon == 2 {
@@ -1170,6 +1445,12 @@ impl RustCraftApp {
 
         ui.painter()
             .rect_filled(installed_rect, CornerRadius::same(16), CARD);
+        ui.painter().rect_stroke(
+            installed_rect,
+            CornerRadius::same(16),
+            Stroke::new(1.0_f32, Color32::from_rgb(39, 36, 42)),
+            egui::StrokeKind::Inside,
+        );
         ui.painter().text(
             Pos2::new(installed_rect.min.x + 20.0, installed_rect.min.y + 26.0),
             Align2::LEFT_CENTER,
@@ -1177,93 +1458,28 @@ impl RustCraftApp {
             FontId::proportional(20.0),
             TEXT,
         );
+        ui.painter().text(
+            Pos2::new(installed_rect.max.x - 20.0, installed_rect.min.y + 26.0),
+            Align2::RIGHT_CENTER,
+            format!("{}", self.versions.len()),
+            FontId::proportional(13.0),
+            YELLOW,
+        );
 
-        let mut row_y = installed_rect.min.y + 54.0;
-        if self.versions.is_empty() {
-            ui.painter().text(
-                Pos2::new(installed_rect.min.x + 20.0, row_y + 10.0),
-                Align2::LEFT_TOP,
-                "Todavía no hay ninguna versión.\nInstala nightly desde la lista de la derecha.",
-                FontId::proportional(14.0),
-                MUTED,
-            );
-        }
-        let versions: Vec<_> = self
-            .versions
-            .iter()
-            .map(|version| {
-                (
-                    version.meta.tag.clone(),
-                    version.meta.asset.clone(),
-                    version.meta.installed_at,
-                )
-            })
-            .collect();
-        for (tag, asset, _) in versions {
-            if row_y + 82.0 > installed_rect.max.y {
-                break;
-            }
-            let row = Rect::from_min_size(
-                Pos2::new(installed_rect.min.x + 14.0, row_y),
-                Vec2::new(installed_rect.width() - 28.0, 76.0),
-            );
-            ui.painter()
-                .rect_filled(row, CornerRadius::same(12), CARD_SOFT);
-            ui.painter().text(
-                Pos2::new(row.min.x + 14.0, row.min.y + 22.0),
-                Align2::LEFT_CENTER,
-                &tag,
-                FontId::proportional(17.0),
-                TEXT,
-            );
-            ui.painter().text(
-                Pos2::new(row.min.x + 14.0, row.min.y + 48.0),
-                Align2::LEFT_CENTER,
-                asset,
-                FontId::proportional(12.0),
-                MUTED,
-            );
-
-            let play_rect = Rect::from_min_size(
-                Pos2::new(row.max.x - 156.0, row.min.y + 18.0),
-                Vec2::new(70.0, 36.0),
-            );
-            let play = ui.put(
-                play_rect,
-                egui::Button::new(RichText::new("Jugar").size(14.0).color(Color32::BLACK))
-                    .fill(YELLOW)
-                    .corner_radius(10.0),
-            );
-            if play.clicked() {
-                self.config.selected_version = Some(tag.clone());
-                let _ = self.config.save(&self.paths.config_file());
-                if let Some(instance) = self.selected_instance().cloned() {
-                    self.spawn_play(ui.ctx(), &instance);
-                }
-            }
-
-            let prep_rect = Rect::from_min_size(
-                Pos2::new(row.max.x - 80.0, row.min.y + 18.0),
-                Vec2::new(66.0, 36.0),
-            );
-            let prep = ui.put(
-                prep_rect,
-                egui::Button::new(RichText::new("Preparar").size(12.0).color(TEXT))
-                    .fill(CARD)
-                    .corner_radius(10.0)
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(70, 65, 70))),
-            );
-            if prep.clicked() {
-                self.config.selected_version = Some(tag.clone());
-                let _ = self.config.save(&self.paths.config_file());
-                self.spawn_prepare(ui.ctx(), tag.clone());
-            }
-
-            row_y += 86.0;
-        }
+        let installed_list = Rect::from_min_max(
+            Pos2::new(installed_rect.min.x + 12.0, installed_rect.min.y + 48.0),
+            Pos2::new(installed_rect.max.x - 12.0, installed_rect.max.y - 12.0),
+        );
+        self.installed_list(ui, installed_list);
 
         ui.painter()
             .rect_filled(remote_rect, CornerRadius::same(16), CARD);
+        ui.painter().rect_stroke(
+            remote_rect,
+            CornerRadius::same(16),
+            Stroke::new(1.0_f32, Color32::from_rgb(39, 36, 42)),
+            egui::StrokeKind::Inside,
+        );
         ui.painter().text(
             Pos2::new(remote_rect.min.x + 20.0, remote_rect.min.y + 26.0),
             Align2::LEFT_CENTER,
@@ -1271,8 +1487,15 @@ impl RustCraftApp {
             FontId::proportional(20.0),
             TEXT,
         );
+        ui.painter().text(
+            Pos2::new(remote_rect.max.x - 136.0, remote_rect.min.y + 26.0),
+            Align2::RIGHT_CENTER,
+            format!("{}", self.remote.len()),
+            FontId::proportional(13.0),
+            YELLOW,
+        );
         let refresh_rect = Rect::from_min_size(
-            Pos2::new(remote_rect.max.x - 120.0, remote_rect.min.y + 12.0),
+            Pos2::new(remote_rect.max.x - 120.0, remote_rect.min.y + 11.0),
             Vec2::new(104.0, 30.0),
         );
         let refresh = ui.put(
@@ -1285,80 +1508,437 @@ impl RustCraftApp {
             self.spawn_releases(ui.ctx());
         }
 
-        let mut remote_y = remote_rect.min.y + 54.0;
-        if self.remote.is_empty() {
-            ui.painter().text(
-                Pos2::new(remote_rect.min.x + 20.0, remote_y + 10.0),
-                Align2::LEFT_TOP,
-                "Pulsa Actualizar para consultar las versiones de horizon-rust/horizon.",
-                FontId::proportional(14.0),
-                MUTED,
-            );
-        }
-        let releases: Vec<_> = self
-            .remote
-            .iter()
-            .map(|release| {
-                (
-                    release.tag_name.clone(),
-                    release.published_at.clone().unwrap_or_default(),
-                    release.prerelease,
-                )
-            })
-            .take(8)
-            .collect();
-        for (tag, date, prerelease) in releases {
-            if remote_y + 66.0 > remote_rect.max.y {
-                break;
-            }
-            let row = Rect::from_min_size(
-                Pos2::new(remote_rect.min.x + 14.0, remote_y),
-                Vec2::new(remote_rect.width() - 28.0, 60.0),
-            );
-            ui.painter()
-                .rect_filled(row, CornerRadius::same(12), CARD_SOFT);
-            ui.painter().text(
-                Pos2::new(row.min.x + 14.0, row.min.y + 20.0),
-                Align2::LEFT_CENTER,
-                &tag,
-                FontId::proportional(16.0),
-                TEXT,
-            );
-            let note = if prerelease {
-                format!("{date} · preliminar")
-            } else {
-                date.clone()
-            };
-            ui.painter().text(
-                Pos2::new(row.min.x + 14.0, row.min.y + 42.0),
-                Align2::LEFT_CENTER,
-                note,
-                FontId::proportional(11.0),
-                MUTED,
-            );
-            let install_rect = Rect::from_min_size(
-                Pos2::new(row.max.x - 92.0, row.min.y + 12.0),
-                Vec2::new(80.0, 34.0),
-            );
-            let install = ui.put(
-                install_rect,
-                egui::Button::new(
-                    RichText::new("Instalar").size(13.0).color(Color32::BLACK),
-                )
-                .fill(YELLOW)
-                .corner_radius(10.0),
-            );
-            if install.clicked() {
-                self.spawn_install(ui.ctx(), tag.clone());
-            }
-            remote_y += 68.0;
-        }
+        let remote_list = Rect::from_min_max(
+            Pos2::new(remote_rect.min.x + 12.0, remote_rect.min.y + 48.0),
+            Pos2::new(remote_rect.max.x - 12.0, remote_rect.max.y - 12.0),
+        );
+        self.remote_list(ui, remote_list);
 
         let log_rect = Rect::from_min_size(
             Pos2::new(rect.min.x + 10.0, rect.max.y - 170.0),
             Vec2::new(rect.width() - 20.0, 160.0),
         );
         self.paint_logs(ui, log_rect);
+    }
+
+    fn installed_list(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt("installed-versions")
+            .auto_shrink([false, false])
+            .show(&mut child, |ui| {
+                ui.set_width(rect.width());
+                if self.versions.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Todavía no hay ninguna versión.\nInstala una desde la lista de la derecha.",
+                        )
+                        .size(14.0)
+                        .color(MUTED),
+                    );
+                    return;
+                }
+                let versions = self.versions.clone();
+                for version in &versions {
+                    self.installed_row(ui, version);
+                }
+                ui.add_space(4.0);
+            });
+    }
+
+    fn installed_row(&mut self, ui: &mut egui::Ui, version: &github_releases::InstalledVersion) {
+        let tag = version.meta.tag.clone();
+        let size = dir_size(&version.path);
+        let age = format_age(version.meta.installed_at);
+        let detail = format!("{} · {} · {}", version.meta.asset, format_bytes(size), age);
+        let mut prepare = false;
+        let mut play = false;
+        let mut remove = false;
+
+        egui::Frame::NONE
+            .fill(CARD_SOFT)
+            .corner_radius(12)
+            .inner_margin(Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&tag).size(16.0).strong().color(TEXT));
+                        ui.label(RichText::new(&detail).size(11.0).color(MUTED));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Eliminar").size(12.0).color(RED),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .corner_radius(8.0),
+                            )
+                            .clicked()
+                        {
+                            remove = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Preparar").size(12.0).color(TEXT),
+                                )
+                                .fill(CARD)
+                                .corner_radius(8.0)
+                                .stroke(Stroke::new(
+                                    1.0_f32,
+                                    Color32::from_rgb(70, 65, 70),
+                                )),
+                            )
+                            .clicked()
+                        {
+                            prepare = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Jugar")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(Color32::BLACK),
+                                )
+                                .fill(YELLOW)
+                                .corner_radius(8.0),
+                            )
+                            .clicked()
+                        {
+                            play = true;
+                        }
+                    });
+                });
+            });
+        ui.add_space(6.0);
+
+        if remove {
+            self.delete_target = Some(tag.clone());
+        }
+        if prepare {
+            self.config.selected_version = Some(tag.clone());
+            let _ = self.config.save(&self.paths.config_file());
+            self.spawn_prepare(ui.ctx(), tag);
+        } else if play {
+            self.config.selected_version = Some(tag.clone());
+            let _ = self.config.save(&self.paths.config_file());
+            if let Some(instance) = self.selected_instance().cloned() {
+                self.spawn_play(ui.ctx(), &instance);
+            } else {
+                self.status = "crea una instancia en Configuración antes de jugar".into();
+            }
+        }
+    }
+
+    fn remote_list(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt("remote-versions")
+            .auto_shrink([false, false])
+            .show(&mut child, |ui| {
+                ui.set_width(rect.width());
+                if self.remote.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Pulsa Actualizar para consultar las versiones de horizon-rust/horizon.",
+                        )
+                        .size(14.0)
+                        .color(MUTED),
+                    );
+                    return;
+                }
+                let releases = self.remote.clone();
+                for release in &releases {
+                    self.remote_row(ui, release);
+                }
+                ui.add_space(4.0);
+            });
+    }
+
+    fn remote_row(&mut self, ui: &mut egui::Ui, release: &Release) {
+        let tag = release.tag_name.clone();
+        let installed = self.versions.iter().any(|v| v.meta.tag == tag);
+        let asset_size = Platform::current()
+            .ok()
+            .and_then(|platform| release.asset(platform.asset_name()))
+            .map(|asset| asset.size)
+            .unwrap_or(0);
+        let date = release
+            .published_at
+            .as_deref()
+            .map(|date| date.get(..10).unwrap_or(date))
+            .unwrap_or("");
+        let name = if release.name.trim().is_empty() {
+            tag.clone()
+        } else {
+            release.name.clone()
+        };
+        let mut note = format!("{tag} · {}", format_bytes(asset_size));
+        if !date.is_empty() {
+            note.push_str(&format!(" · {date}"));
+        }
+        if release.prerelease {
+            note.push_str(" · preliminar");
+        }
+        let mut install = false;
+
+        egui::Frame::NONE
+            .fill(CARD_SOFT)
+            .corner_radius(12)
+            .inner_margin(Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&name).size(15.0).strong().color(TEXT));
+                        ui.label(RichText::new(&note).size(11.0).color(MUTED));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if installed {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(
+                                    RichText::new("Instalado").size(12.0).color(MUTED),
+                                )
+                                .fill(CARD)
+                                .corner_radius(8.0),
+                            );
+                        } else if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Instalar")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(Color32::BLACK),
+                                )
+                                .fill(YELLOW)
+                                .corner_radius(8.0),
+                            )
+                            .clicked()
+                        {
+                            install = true;
+                        }
+                    });
+                });
+            });
+        ui.add_space(6.0);
+
+        if install {
+            self.spawn_install(ui.ctx(), tag);
+        }
+    }
+
+    fn paint_update_dialog(&mut self, ui: &mut egui::Ui, full: Rect) {
+        let Some(release) = self.available_update.clone() else {
+            self.update_dialog = false;
+            return;
+        };
+        let updating = matches!(
+            self.task.as_ref(),
+            Some(Task {
+                kind: TaskKind::Update,
+                ..
+            })
+        );
+
+        ui.painter()
+            .rect_filled(full, CornerRadius::ZERO, Color32::from_black_alpha(150));
+        let size = Vec2::new(520.0, if updating { 300.0 } else { 330.0 });
+        let dialog = Rect::from_center_size(full.center(), size);
+        ui.painter()
+            .rect_filled(dialog, CornerRadius::same(18), CARD);
+        ui.painter().rect_stroke(
+            dialog,
+            CornerRadius::same(18),
+            Stroke::new(1.0_f32, YELLOW),
+            egui::StrokeKind::Outside,
+        );
+        ui.painter().text(
+            Pos2::new(dialog.min.x + 26.0, dialog.min.y + 38.0),
+            Align2::LEFT_CENTER,
+            "Actualización disponible",
+            FontId::proportional(23.0),
+            TEXT,
+        );
+        ui.painter().text(
+            Pos2::new(dialog.min.x + 26.0, dialog.min.y + 72.0),
+            Align2::LEFT_TOP,
+            format!(
+                "Tienes RustCraft {}. La nueva versión es {}.",
+                env!("CARGO_PKG_VERSION"),
+                release.tag_name
+            ),
+            FontId::proportional(14.0),
+            MUTED,
+        );
+        let notes = summarize(&release.body, 320);
+        let notes_rect = Rect::from_min_max(
+            Pos2::new(dialog.min.x + 26.0, dialog.min.y + 104.0),
+            Pos2::new(dialog.max.x - 26.0, dialog.min.y + 184.0),
+        );
+        let painter = ui.painter().with_clip_rect(notes_rect);
+        let (galley, _) = fit_wrapped(
+            &painter,
+            &notes,
+            FontId::proportional(13.0),
+            MUTED,
+            notes_rect.width(),
+            notes_rect.height(),
+        );
+        painter.galley(notes_rect.min, galley, MUTED);
+
+        if updating {
+            let progress = self
+                .display_progress
+                .or(self.progress)
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            ui.painter().text(
+                Pos2::new(dialog.min.x + 26.0, dialog.min.y + 220.0),
+                Align2::LEFT_CENTER,
+                format!("Descargando RustCraft {}… {:.0} %", release.tag_name, progress * 100.0),
+                FontId::proportional(14.0),
+                TEXT,
+            );
+            let bar = Rect::from_min_size(
+                Pos2::new(dialog.min.x + 26.0, dialog.min.y + 238.0),
+                Vec2::new(dialog.width() - 52.0, 10.0),
+            );
+            paint_progress_bar(ui, bar, progress, ui.input(|input| input.time));
+            if let Some(note) = &self.bytes_note {
+                ui.painter().text(
+                    Pos2::new(dialog.min.x + 26.0, dialog.min.y + 266.0),
+                    Align2::LEFT_CENTER,
+                    truncate(note, 110),
+                    FontId::proportional(12.0),
+                    MUTED,
+                );
+            }
+        } else {
+            let button_y = dialog.max.y - 68.0;
+            let cancel = ui.put(
+                Rect::from_min_size(
+                    Pos2::new(dialog.min.x + 26.0, button_y),
+                    Vec2::new(120.0, 44.0),
+                ),
+                egui::Button::new(RichText::new("Ahora no").size(14.0).color(TEXT))
+                    .fill(CARD_SOFT)
+                    .corner_radius(12.0),
+            );
+            let update = ui.put(
+                Rect::from_min_size(
+                    Pos2::new(dialog.max.x - 166.0, button_y),
+                    Vec2::new(140.0, 44.0),
+                ),
+                egui::Button::new(
+                    RichText::new("Actualizar")
+                        .size(14.0)
+                        .strong()
+                        .color(Color32::BLACK),
+                )
+                .fill(YELLOW)
+                .corner_radius(12.0),
+            );
+            if cancel.clicked() {
+                self.update_dialog = false;
+                self.update_dismissed = true;
+                self.status = "actualización omitida; puedes seguir jugando".into();
+            }
+            if update.clicked() {
+                self.spawn_update(ui.ctx(), release);
+            }
+        }
+    }
+
+    fn paint_delete_dialog(&mut self, ui: &mut egui::Ui, full: Rect) {
+        let Some(tag) = self.delete_target.clone() else {
+            return;
+        };
+        ui.painter()
+            .rect_filled(full, CornerRadius::ZERO, Color32::from_black_alpha(150));
+
+        let size = Vec2::new(420.0, 220.0);
+        let dialog = Rect::from_center_size(full.center(), size);
+        ui.painter()
+            .rect_filled(dialog, CornerRadius::same(18), CARD);
+        ui.painter().rect_stroke(
+            dialog,
+            CornerRadius::same(18),
+            Stroke::new(1.0_f32, RED),
+            egui::StrokeKind::Outside,
+        );
+        ui.painter().text(
+            Pos2::new(dialog.min.x + 24.0, dialog.min.y + 36.0),
+            Align2::LEFT_CENTER,
+            "Eliminar versión",
+            FontId::proportional(22.0),
+            TEXT,
+        );
+        ui.painter().text(
+            Pos2::new(dialog.min.x + 24.0, dialog.min.y + 74.0),
+            Align2::LEFT_TOP,
+            format!(
+                "Se eliminará Horizon {tag} y su archivo descargado.\nLas instancias y los mundos no se tocan."
+            ),
+            FontId::proportional(14.0),
+            MUTED,
+        );
+
+        let button_y = dialog.max.y - 62.0;
+        let cancel = ui.put(
+            Rect::from_min_size(
+                Pos2::new(dialog.min.x + 24.0, button_y),
+                Vec2::new(110.0, 42.0),
+            ),
+            egui::Button::new(RichText::new("Cancelar").size(14.0).color(TEXT))
+                .fill(CARD_SOFT)
+                .corner_radius(12.0),
+        );
+        let delete = ui.put(
+            Rect::from_min_size(
+                Pos2::new(dialog.max.x - 144.0, button_y),
+                Vec2::new(120.0, 42.0),
+            ),
+            egui::Button::new(
+                RichText::new("Eliminar")
+                    .size(14.0)
+                    .strong()
+                    .color(Color32::WHITE),
+            )
+            .fill(RED)
+            .corner_radius(12.0),
+        );
+
+        if cancel.clicked() {
+            self.delete_target = None;
+        }
+        if delete.clicked() {
+            match github_releases::remove_installed(&self.paths, &tag) {
+                Ok(()) => {
+                    if self.config.selected_version.as_deref() == Some(tag.as_str()) {
+                        self.config.selected_version = None;
+                        let _ = self.config.save(&self.paths.config_file());
+                    }
+                    self.status = format!("Horizon {tag} eliminado");
+                    self.delete_target = None;
+                    self.refresh();
+                }
+                Err(error) => self.status = format!("{error}"),
+            }
+        }
     }
 
     fn settings(&mut self, ui: &mut egui::Ui, rect: Rect, top: f32) {
@@ -1807,7 +2387,11 @@ impl RustCraftApp {
             YELLOW,
         );
 
-        let progress = self.progress.unwrap_or(0.0).clamp(0.0, 1.0);
+        let progress = self
+            .display_progress
+            .or(self.progress)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
         ui.painter().text(
             Pos2::new(card.min.x + 18.0, card.min.y + 20.0),
             Align2::LEFT_CENTER,
@@ -1827,18 +2411,7 @@ impl RustCraftApp {
             Pos2::new(card.min.x + 18.0, card.min.y + 36.0),
             Vec2::new(card.width() - 36.0, 8.0),
         );
-        ui.painter()
-            .rect_filled(bar, CornerRadius::same(4), Color32::from_rgb(45, 41, 47));
-        if progress > 0.0 {
-            ui.painter().rect_filled(
-                Rect::from_min_size(
-                    bar.min,
-                    Vec2::new(bar.width() * progress, bar.height()),
-                ),
-                CornerRadius::same(4),
-                YELLOW,
-            );
-        }
+        paint_progress_bar(ui, bar, progress, ui.input(|input| input.time));
 
         let stage = if progress >= 1.0 {
             "Instalando archivos…".to_owned()
@@ -1873,6 +2446,7 @@ impl RustCraftApp {
                 TaskKind::Install(tag) => format!("Instalando {tag}…"),
                 TaskKind::Prepare(tag) => format!("Preparando {tag}…"),
                 TaskKind::Play(name) => format!("Horizon abierto en {name}"),
+                TaskKind::Update => "Actualizando RustCraft…".to_owned(),
             },
             None => self.status.clone(),
         };
@@ -1884,18 +2458,12 @@ impl RustCraftApp {
             if self.busy() { YELLOW } else { MUTED },
         );
 
-        if let Some(progress) = self.progress {
+        if let Some(progress) = self.display_progress.or(self.progress) {
             let bar = Rect::from_min_size(
                 Pos2::new(rect.min.x + 14.0, rect.min.y + 28.0),
                 Vec2::new(rect.width() - 28.0, 5.0),
             );
-            ui.painter()
-                .rect_filled(bar, CornerRadius::same(3), Color32::from_rgb(45, 41, 47));
-            ui.painter().rect_filled(
-                Rect::from_min_size(bar.min, Vec2::new(bar.width() * progress.clamp(0.0, 1.0), 5.0)),
-                CornerRadius::same(3),
-                YELLOW,
-            );
+            paint_progress_bar(ui, bar, progress.clamp(0.0, 1.0), ui.input(|input| input.time));
         }
 
         if let Some(note) = &self.bytes_note {
@@ -1932,6 +2500,176 @@ impl RustCraftApp {
             );
         }
     }
+}
+
+fn install_binary(downloaded: &Path, current: &Path) -> RcResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(downloaded, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| {
+                RcError::io(
+                    format!("could not mark {} as executable", downloaded.display()),
+                    error,
+                )
+            })?;
+        std::fs::rename(downloaded, current).map_err(|error| {
+            RcError::io(
+                format!("could not replace {}", current.display()),
+                error,
+            )
+        })?;
+    }
+
+    #[cfg(windows)]
+    {
+        let old = current.with_extension("old.exe");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(current, &old).map_err(|error| {
+            RcError::io(
+                format!("could not move the previous {}", current.display()),
+                error,
+            )
+        })?;
+        std::fs::rename(downloaded, current).map_err(|error| {
+            RcError::io(
+                format!("could not install the new {}", current.display()),
+                error,
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn paint_progress_bar(ui: &egui::Ui, bar: Rect, progress: f32, time: f64) {
+    let painter = ui.painter();
+    let radius = CornerRadius::same(4);
+    painter.rect_filled(bar, radius, Color32::from_rgb(45, 41, 47));
+    let filled = bar.width() * progress.clamp(0.0, 1.0);
+    if filled <= 0.5 {
+        return;
+    }
+    let fill = Rect::from_min_size(bar.min, Vec2::new(filled, bar.height()));
+    let clipped = painter.with_clip_rect(fill);
+    clipped.rect_filled(fill, radius, YELLOW);
+    let step = 18.0;
+    let offset = (time as f32 * 42.0) % step;
+    let mut x = fill.min.x - step + offset;
+    while x < fill.max.x {
+        clipped.rect_filled(
+            Rect::from_min_size(Pos2::new(x, fill.min.y), Vec2::new(step * 0.45, fill.height())),
+            CornerRadius::ZERO,
+            Color32::from_white_alpha(26),
+        );
+        x += step;
+    }
+}
+
+/// Wrap `text` and shorten it with an ellipsis when it does not fit in
+/// `max_height`. Used by the news card so long bodies never overflow.
+fn fit_wrapped(
+    painter: &egui::Painter,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+    max_height: f32,
+) -> (std::sync::Arc<egui::Galley>, bool) {
+    let width = width.max(1.0);
+    let galley = painter.layout(text.to_owned(), font.clone(), color, width);
+    if galley.size().y <= max_height {
+        return (galley, false);
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        let mut candidate: String = chars[..mid].iter().collect();
+        if mid < chars.len() {
+            candidate.push('…');
+        }
+        let trial = painter.layout(candidate, font.clone(), color, width);
+        if trial.size().y <= max_height {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let mut shortened: String = chars[..low].iter().collect();
+    if low < chars.len() {
+        shortened.push('…');
+    }
+    (
+        painter.layout(shortened, font, color, width),
+        true,
+    )
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total += dir_size(&path);
+        } else if let Ok(metadata) = path.metadata() {
+            total += metadata.len();
+        }
+    }
+    total
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes == 0 {
+        return "—".to_owned();
+    }
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_age(installed_at: u64) -> String {
+    if installed_at == 0 {
+        return "fecha desconocida".to_owned();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let elapsed = now.saturating_sub(installed_at);
+    if elapsed < 3600 {
+        "hace menos de 1 h".to_owned()
+    } else if elapsed < 86_400 {
+        format!("hace {} h", elapsed / 3600)
+    } else if elapsed < 172_800 {
+        "ayer".to_owned()
+    } else {
+        format!("hace {} días", elapsed / 86_400)
+    }
+}
+
+fn lerp_color(from: Color32, to: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+        mix(from.a(), to.a()),
+    )
 }
 
 fn load_texture(ctx: &egui::Context, name: &str, bytes: &[u8]) -> Option<TextureHandle> {

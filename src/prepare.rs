@@ -65,6 +65,16 @@ struct ProgressLine {
     error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AssetIndexFile {
+    objects: std::collections::BTreeMap<String, AssetObjectFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetObjectFile {
+    hash: String,
+}
+
 enum StreamEvent {
     Stdout(String),
     Stderr(String),
@@ -324,11 +334,25 @@ pub fn minecraft_ready(paths: &AppPaths, version: &str) -> bool {
                 .map(str::to_owned)
         })
         .is_some_and(|id| {
-            paths
+            let index_path = paths
                 .assets_dir()
                 .join("indexes")
-                .join(format!("{id}.json"))
-                .is_file()
+                .join(format!("{id}.json"));
+            let Ok(text) = fs::read_to_string(&index_path) else {
+                return false;
+            };
+            let Ok(index) = serde_json::from_str::<AssetIndexFile>(&text) else {
+                return false;
+            };
+            let objects = paths.assets_dir().join("objects");
+            !index.objects.is_empty()
+                && index.objects.values().all(|object| {
+                    object.hash.len() == 40
+                        && objects
+                            .join(&object.hash[..2])
+                            .join(&object.hash)
+                            .is_file()
+                })
         });
 
     let assets_ok = paths.assets_dir().join("objects").is_dir();

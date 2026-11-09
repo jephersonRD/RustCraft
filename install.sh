@@ -62,7 +62,7 @@ Opciones:
   -h, --help    Muestra esta ayuda.
 
 Variables:
-  RUSTCRAFT_VERSION   Etiqueta del release, por ejemplo v0.1.0. Por defecto: latest.
+  RUSTCRAFT_VERSION   Etiqueta del release, por ejemplo v0.1.1. Por defecto: latest.
   RUSTCRAFT_PREFIX    Prefijo de instalación. Por defecto: ~/.local.
   RUSTCRAFT_DATA_DIR  Carpeta de datos. Por defecto: ~/.local/share/RustCraft.
 EOF
@@ -181,37 +181,104 @@ java_major() {
     java -version 2>&1 | sed -n '1s/.*version "\([0-9][0-9]*\).*/\1/p'
 }
 
-java_hint() {
+java_package() {
     case "$PKG" in
-        apt-get) printf '%s' "sudo apt-get update && sudo apt-get install -y openjdk-25-jre-headless" ;;
-        dnf) printf '%s' "sudo dnf install -y java-25-openjdk-headless" ;;
-        yum) printf '%s' "sudo yum install -y java-25-openjdk-headless" ;;
-        pacman) printf '%s' "sudo pacman -S --needed jre-openjdk-headless" ;;
-        zypper) printf '%s' "sudo zypper install -y java-25-openjdk-headless" ;;
-        apk) printf '%s' "sudo apk add openjdk25-jre-headless" ;;
-        xbps-install) printf '%s' "sudo xbps-install -S openjdk25-jre" ;;
-        eopkg) printf '%s' "sudo eopkg install openjdk-25-jre" ;;
-        *) printf '%s' "instala Temurin 25 desde https://adoptium.net" ;;
+        apt-get) printf '%s' "openjdk-25-jre-headless" ;;
+        dnf|yum) printf '%s' "java-25-openjdk-headless" ;;
+        pacman) printf '%s' "jre-openjdk-headless" ;;
+        zypper) printf '%s' "java-25-openjdk-headless" ;;
+        apk) printf '%s' "openjdk25-jre-headless" ;;
+        xbps-install) printf '%s' "openjdk25-jre" ;;
+        eopkg) printf '%s' "openjdk-25-jre" ;;
+        *) printf '%s' "" ;;
     esac
 }
 
-check_java() {
+java_hint() {
+    local package
+    package="$(java_package)"
+    if [ -z "$package" ]; then
+        printf '%s' "instala Temurin 25 desde https://adoptium.net"
+        return
+    fi
+    case "$PKG" in
+        apt-get) printf '%s' "sudo apt-get update && sudo apt-get install -y $package" ;;
+        dnf|yum|zypper) printf '%s' "sudo $PKG install -y $package" ;;
+        pacman) printf '%s' "sudo pacman -S --needed $package" ;;
+        apk) printf '%s' "sudo apk add $package" ;;
+        xbps-install) printf '%s' "sudo xbps-install -S $package" ;;
+        eopkg) printf '%s' "sudo eopkg install $package" ;;
+    esac
+}
+
+install_java() {
     local major
     major="$(java_major || true)"
     if [ -n "$major" ] && [ "$major" -ge 25 ] 2>/dev/null; then
         ok "Java $major detectado"
         return
     fi
-    warn "Java 25 no está instalado (lo necesita horizon-prepare)"
-    if [ "$OS" = "linux" ]; then
-        printf '  Sistema: %s\n' "$DISTRO"
-        if [ -n "$PKG" ]; then
-            printf '  Gestor:  %s\n' "$PKG"
-        fi
-        printf '  Comando: %s\n' "$(java_hint)"
-    else
+
+    warn "Java 25 o superior no está instalado (lo necesita horizon-prepare)"
+    if [ "$OS" != "linux" ]; then
         printf '  Instala Temurin 25 desde https://adoptium.net\n'
+        return
     fi
+
+    printf '  Sistema: %s\n' "$DISTRO"
+    [ -n "$PKG" ] && printf '  Gestor:  %s\n' "$PKG"
+    printf '  Comando: %s\n' "$(java_hint)"
+
+    local package
+    package="$(java_package)"
+    if [ -z "$PKG" ] || [ -z "$package" ]; then
+        return
+    fi
+
+    if [ "$ASSUME_YES" -eq 0 ]; then
+        if [ ! -t 0 ]; then
+            warn "sin terminal interactiva; ejecuta el comando de arriba para instalar Java"
+            return
+        fi
+        local answer=""
+        printf '¿Instalar Java 25 ahora con %s? [S/n] ' "$PKG"
+        read -r answer || true
+        case "$answer" in
+            n|N|no|No) warn "Java no instalado; RustCraft no podrá preparar Horizon"; return ;;
+        esac
+    fi
+
+    say "instalando Java 25…"
+    local installed=0
+    case "$PKG" in
+        apt-get)
+            sudo apt-get update && sudo apt-get install -y "$package" && installed=1
+            ;;
+        dnf|yum|zypper)
+            sudo "$PKG" install -y "$package" && installed=1
+            ;;
+        pacman)
+            sudo pacman -S --needed --noconfirm "$package" && installed=1
+            ;;
+        apk)
+            sudo apk add "$package" && installed=1
+            ;;
+        xbps-install)
+            sudo xbps-install -S -y "$package" && installed=1
+            ;;
+        eopkg)
+            sudo eopkg install -y "$package" && installed=1
+            ;;
+    esac || true
+
+    major="$(java_major || true)"
+    if [ "$installed" -eq 1 ] && [ -n "$major" ] && [ "$major" -ge 25 ] 2>/dev/null; then
+        ok "Java $major instalado"
+        return
+    fi
+    warn "no se pudo instalar Java automáticamente"
+    printf '  Ejecuta: %s\n' "$(java_hint)"
+    printf '  O instala Temurin 25 desde https://adoptium.net\n'
 }
 
 install_desktop_entry() {
@@ -259,16 +326,33 @@ Name=RustCraft
 GenericName=Lanzador de Minecraft
 Comment=Lanzador offline para Horizon
 Exec="$exec_path"
-Icon=rustcraft
+TryExec=$exec_path
+Icon=${icon_src:+$ICON_DIR/rustcraft.png}
 Terminal=false
-Categories=Game;
+Categories=Game;ActionGame;
 Keywords=minecraft;horizon;launcher;
 StartupNotify=true
+StartupWMClass=RustCraft
 EOF
+    if [ -z "$icon_src" ]; then
+        sed -i 's|^Icon=.*|Icon=rustcraft|' "$DESKTOP_DIR/rustcraft.desktop"
+    fi
     chmod 644 "$DESKTOP_DIR/rustcraft.desktop"
+
+    # Some desktops only scan the default applications directory.
+    local default_dir="$HOME/.local/share/applications"
+    if [ "$DESKTOP_DIR" != "$default_dir" ]; then
+        mkdir -p "$default_dir" 2>/dev/null || true
+        cp -f "$DESKTOP_DIR/rustcraft.desktop" "$default_dir/rustcraft.desktop" 2>/dev/null || true
+    fi
 
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+        [ "$DESKTOP_DIR" = "$default_dir" ] ||
+            update-desktop-database "$default_dir" >/dev/null 2>&1 || true
+    fi
+    if command -v xdg-desktop-menu >/dev/null 2>&1; then
+        xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
     fi
     ok "entrada añadida al menú de aplicaciones"
 }
@@ -279,6 +363,11 @@ remove_desktop_entry() {
     local removed=0
     if [ -f "$DESKTOP_DIR/rustcraft.desktop" ]; then
         rm -f "$DESKTOP_DIR/rustcraft.desktop"
+        removed=1
+    fi
+    local default_entry="$HOME/.local/share/applications/rustcraft.desktop"
+    if [ -f "$default_entry" ] && [ "$default_entry" != "$DESKTOP_DIR/rustcraft.desktop" ]; then
+        rm -f "$default_entry"
         removed=1
     fi
     if [ -f "$ICON_DIR/rustcraft.png" ]; then
@@ -319,7 +408,7 @@ install_app() {
         warn "no se pudo crear la entrada del menú de aplicaciones"
     fi
     ok "RustCraft instalado en $BIN_DIR/$BIN"
-    check_java
+    install_java
     printf '\nEjecuta: %srustcraft%s\n' "$YELLOW" "$RESET"
 }
 

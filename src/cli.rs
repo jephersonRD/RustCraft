@@ -561,6 +561,22 @@ fn play(
     let width = width.unwrap_or(config.window.width).clamp(320, 7680);
     let height = height.unwrap_or(config.window.height).clamp(240, 4320);
 
+    // Instances created before a version was chosen can point at a tag that is
+    // not installed. Rebind them to the selected or newest installed version.
+    let mut instance = instance;
+    let installed = github_releases::installed_versions(paths)?;
+    let is_installed = |tag: &str| installed.iter().any(|version| version.meta.tag == tag);
+    if !is_installed(&instance.version_tag) {
+        if let Some(fallback) = installed
+            .iter()
+            .find(|version| version.meta.tag == tag)
+            .or_else(|| installed.first())
+        {
+            instance.version_tag = fallback.meta.tag.clone();
+            instance.save(paths)?;
+        }
+    }
+
     println!(
         "launching {} ({}) as {} [{}]",
         instance.name, instance.version_tag, account.name, account.uuid
