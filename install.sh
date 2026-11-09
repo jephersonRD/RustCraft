@@ -784,25 +784,33 @@ show_menu() {
         printf '%s\n' "${GREY}RustCraft no está instalado todavía${RESET}"
     fi
     printf '\n'
-    printf '%s\n' "${ORANGE}╭─────────────────────────────────────╮${RESET}"
 
     local item_1 item_2 item_3 item_4
     if [ "$already" -eq 1 ]; then
-        item_1="${GREY}[1] ⬇  Descargar / Instalar${RESET}  ${GREY}(ya instalado)${RESET}"
+        item_1="${WHITE}[1] ${O}⬇${RESET}  Descargar / Instalar  ${GREY}(ya instalado)${RESET}"
         item_2="${WHITE}[2] ${O}⟳${RESET}  Actualizar${RESET}"
         item_3="${WHITE}[3] ${O}✖${RESET}  Desinstalar${RESET}"
         item_4="${WHITE}[0] ${O}⏻${RESET}  Salir${RESET}"
     else
         item_1="${WHITE}[1] ${O}⬇${RESET}  Descargar / Instalar${RESET}"
-        item_2="${GREY}[2] ⟳  Actualizar${RESET}  ${GREY}(no instalado)${RESET}"
-        item_3="${GREY}[3] ✖  Desinstalar${RESET}  ${GREY}(no instalado)${RESET}"
+        item_2="${GREY}[2] ⟳  Actualizar  ${GREY}(instala primero)${RESET}"
+        item_3="${GREY}[3] ✖  Desinstalar  ${GREY}(instala primero)${RESET}"
         item_4="${WHITE}[0] ${O}⏻${RESET}  Salir${RESET}"
     fi
-    printf '%b %b\n' "${ORANGE}│${RESET}" "  $item_1"
-    printf '%b %b\n' "${ORANGE}│${RESET}" "  $item_2"
-    printf '%b %b\n' "${ORANGE}│${RESET}" "  $item_3"
-    printf '%b %b\n' "${ORANGE}│${RESET}" "  $item_4"
-    printf '%s\n' "${ORANGE}╰─────────────────────────────────────╯${RESET}"
+    # Print the item, then jump to a fixed column for the closing border.
+    menu_item() {
+        printf '%b %b' "${ORANGE}│${RESET}" "  $1"
+        printf '\033[41G%b\n' "${ORANGE}│${RESET}"
+    }
+    printf '%s\n' "${ORANGE}╭────────────────────────────────────╮${RESET}"
+    printf '%b%b' "${ORANGE}│${RESET}" "     ${BOLD}${WHITE}RustCraft${RESET}"
+    printf '\033[41G%b\n' "${ORANGE}│${RESET}"
+    printf '%s\n' "${ORANGE}├────────────────────────────────────┤${RESET}"
+    menu_item "$item_1"
+    menu_item "$item_2"
+    menu_item "$item_3"
+    menu_item "$item_4"
+    printf '%s\n' "${ORANGE}╰────────────────────────────────────╯${RESET}"
     printf '\n'
     printf '%s' "  ${BOLD}${WHITE}Pulsa una tecla:${RESET} "
 
