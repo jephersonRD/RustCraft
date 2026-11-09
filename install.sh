@@ -68,10 +68,14 @@ trap 'restore_cursor' EXIT
 trap 'restore_cursor; exit 130' INT TERM
 
 center_text() {
-    local text="$1" width="#"
-    width=$(tput cols 2>/dev/null || printf %s "${#text}")
-    [ "$width" -lt "${#text}" ] 2>/dev/null && width=${#text}
-    local pad=$(( (width - ${#text}) / 2 ))
+    # Center a (possibly colored) line, ignoring ANSI escape codes.
+    local text="$1"
+    local visible
+    visible=$(printf '%s' "$text" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g')
+    local width
+    width=$(tput cols 2>/dev/null || printf '%s' "${#visible}")
+    [ "$width" -ge 1 ] 2>/dev/null || width=${#visible}
+    local pad=$(( (width - ${#visible}) / 2 ))
     [ "$pad" -lt 0 ] && pad=0
     printf '%*s%s\n' "$pad" '' "$text"
 }
@@ -92,8 +96,7 @@ show_banner() {
     if [ "$cols" -lt 80 ]; then
         printf '\n'
         center_text "${BOLD}${ORANGE}R U S T C R A F T${RESET}"
-        printf '\n\n'
-        center_text "${GREY}━━━━━━━━━━━━━━━━${RESET}"
+        center_text "${ORANGE}━━━━━━━━━━━━${RESET}"
         center_text "${DIM}lanzador · versión ${VERSION}${RESET}"
         printf '\n'
         return
@@ -560,7 +563,7 @@ install_desktop_entry() {
 
     if [ -n "$icon_src" ]; then
         mkdir -p "$ICON_DIR" || return 1
-        install -m 644 "$icon_src" "$ICON_DIR/rustcraft.png" || return 1
+        command install -m 644 "$icon_src" "$ICON_DIR/rustcraft.png" || return 1
         if [ -n "$icon_tmp" ]; then
             rm -f "$icon_tmp"
         fi
@@ -679,7 +682,7 @@ install() {
         tmp_named="${TMPDIR:-/tmp}/$(basename "${ASSET}").$$"
         mv "$tmp" "$tmp_named" 2>/dev/null || tmp_named="$tmp"
         if download "$URL" "$tmp_named"; then
-            install -m 755 "$tmp_named" "$BIN_DIR/$BIN"
+            command install -m 755 "$tmp_named" "$BIN_DIR/$BIN"
             rm -f "$tmp_named"
         else
             rm -f "$tmp_named"
@@ -800,17 +803,17 @@ show_menu() {
     # Print the item, then jump to a fixed column for the closing border.
     menu_item() {
         printf '%b %b' "${ORANGE}│${RESET}" "  $1"
-        printf '\033[41G%b\n' "${ORANGE}│${RESET}"
+        printf '\033[50G%b\n' "${ORANGE}│${RESET}"
     }
-    printf '%s\n' "${ORANGE}╭────────────────────────────────────╮${RESET}"
+    printf '%s\n' "${ORANGE}╭────────────────────────────────────────────────╮${RESET}"
     printf '%b%b' "${ORANGE}│${RESET}" "     ${BOLD}${WHITE}RustCraft${RESET}"
-    printf '\033[41G%b\n' "${ORANGE}│${RESET}"
-    printf '%s\n' "${ORANGE}├────────────────────────────────────┤${RESET}"
+    printf '\033[50G%b\n' "${ORANGE}│${RESET}"
+    printf '%s\n' "${ORANGE}├────────────────────────────────────────────────┤${RESET}"
     menu_item "$item_1"
     menu_item "$item_2"
     menu_item "$item_3"
     menu_item "$item_4"
-    printf '%s\n' "${ORANGE}╰────────────────────────────────────╯${RESET}"
+    printf '%s\n' "${ORANGE}╰────────────────────────────────────────────────╯${RESET}"
     printf '\n'
     printf '%s' "  ${BOLD}${WHITE}Pulsa una tecla:${RESET} "
 
