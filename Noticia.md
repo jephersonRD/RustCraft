@@ -1,5 +1,11 @@
 # Noticias de RustCraft
 
+## RustCraft 0.1.2: instalador renovado
+
+_9 de noviembre de 2026_
+
+El instalador de Linux y macOS estrena una interfaz de terminal renovada: banner de RustCraft con degradado de color, menú en caja con iconos y opciones deshabilitadas según el estado de la instalación, barra de progreso con velocidad y bytes restantes, etapas con spinner y caja de resumen final. También corrige pequeños detalles del nombre de usuario en la esquina de la ventana.
+
 ## RustCraft 0.1.1: biblioteca completa y más animaciones
 
 _8 de noviembre de 2026_

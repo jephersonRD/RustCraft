@@ -59,7 +59,7 @@ function Show-Usage {
     Write-Host "  -Help         Show this help."
     Write-Host ""
     Write-Host "Environment:"
-    Write-Host "  RUSTCRAFT_VERSION   Release tag, for example v0.1.1. Default: latest."
+    Write-Host "  RUSTCRAFT_VERSION   Release tag, for example v0.1.2. Default: latest."
     Write-Host ""
     Write-Host "Install location: $ExePath"
     Write-Host "Data location:    $DataDir"

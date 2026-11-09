@@ -86,6 +86,9 @@ pub struct RustCraftApp {
     onboarding: bool,
     dialog_text: String,
     versions: Vec<github_releases::InstalledVersion>,
+    /// Folder sizes are measured once per refresh: walking them inside the
+    /// frame loop stalled the UI and stole frames from the running game.
+    version_sizes: std::collections::HashMap<String, u64>,
     instances: Vec<Instance>,
     remote: Vec<Release>,
     news: Vec<NewsItem>,
@@ -150,6 +153,7 @@ impl RustCraftApp {
             onboarding,
             dialog_text: String::new(),
             versions: Vec::new(),
+            version_sizes: std::collections::HashMap::new(),
             instances: Vec::new(),
             remote: Vec::new(),
             news: Vec::new(),
@@ -179,6 +183,11 @@ impl RustCraftApp {
 
     fn refresh(&mut self) {
         self.versions = github_releases::installed_versions(&self.paths).unwrap_or_default();
+        self.version_sizes = self
+            .versions
+            .iter()
+            .map(|version| (version.meta.tag.clone(), dir_size(&version.path)))
+            .collect();
         self.instances = instances::all(&self.paths).unwrap_or_default();
         if self.selected_instance.is_none() {
             self.selected_instance = self.instances.first().map(|i| i.id.clone());
@@ -204,9 +213,14 @@ impl RustCraftApp {
     }
 
     fn poll_task(&mut self, ctx: &egui::Context) {
+        // The game can print thousands of lines while it starts. Draining the
+        // channel without a bound made a single frame do all that work at once,
+        // which froze the window. Take a slice per frame and keep the rest
+        // queued for the next one.
+        const MAX_MESSAGES_PER_FRAME: usize = 200;
         let mut messages = Vec::new();
         if let Some(task) = &self.task {
-            loop {
+            for _ in 0..MAX_MESSAGES_PER_FRAME {
                 match task.rx.try_recv() {
                     Ok(message) => messages.push(message),
                     Err(TryRecvError::Empty) => break,
@@ -276,8 +290,15 @@ impl RustCraftApp {
                 }
             }
         }
-        if self.task.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        if let Some(task) = &self.task {
+            // While the game runs the launcher only needs to poll its output,
+            // not to keep competing for the GPU. Repaint less often.
+            let millis = if matches!(task.kind, TaskKind::Play(_)) {
+                400
+            } else {
+                120
+            };
+            ctx.request_repaint_after(std::time::Duration::from_millis(millis));
         }
     }
 
@@ -1553,7 +1574,11 @@ impl RustCraftApp {
 
     fn installed_row(&mut self, ui: &mut egui::Ui, version: &github_releases::InstalledVersion) {
         let tag = version.meta.tag.clone();
-        let size = dir_size(&version.path);
+        let size = self
+            .version_sizes
+            .get(&version.meta.tag)
+            .copied()
+            .unwrap_or(0);
         let age = format_age(version.meta.installed_at);
         let detail = format!("{} · {} · {}", version.meta.asset, format_bytes(size), age);
         let mut prepare = false;
@@ -2305,7 +2330,9 @@ impl RustCraftApp {
         }
 
         let button_y = dialog.max.y - 62.0;
-        let save_width = if forced { 160.0 } else { 140.0 };
+        // Three buttons share the 380 px dialog: 24 px padding on each side
+        // leaves 332 px, so 120 + 104 + 92 plus two 8 px gaps fit exactly.
+        let save_width = if forced { 160.0 } else { 120.0 };
         let save = ui.put(
             Rect::from_min_size(
                 Pos2::new(
@@ -2341,8 +2368,8 @@ impl RustCraftApp {
         if !forced {
             let remove = ui.put(
                 Rect::from_min_size(
-                    Pos2::new(dialog.min.x + 176.0, button_y),
-                    Vec2::new(120.0, 42.0),
+                    Pos2::new(dialog.min.x + 152.0, button_y),
+                    Vec2::new(104.0, 42.0),
                 ),
                 egui::Button::new(RichText::new("Eliminar").size(15.0).color(RED))
                     .fill(CARD_SOFT)
@@ -2361,8 +2388,8 @@ impl RustCraftApp {
 
             let close = ui.put(
                 Rect::from_min_size(
-                    Pos2::new(dialog.max.x - 92.0, button_y),
-                    Vec2::new(68.0, 42.0),
+                    Pos2::new(dialog.max.x - 116.0, button_y),
+                    Vec2::new(92.0, 42.0),
                 ),
                 egui::Button::new(RichText::new("Cerrar").size(15.0).color(TEXT))
                     .fill(CARD_SOFT)

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jephersonRD/RustCraft/releases"><img src="https://img.shields.io/badge/versi%C3%B3n-0.1.1-f7c614?style=flat-square" alt="Versión"></a>
+  <a href="https://github.com/jephersonRD/RustCraft/releases"><img src="https://img.shields.io/badge/versi%C3%B3n-0.1.2-f7c614?style=flat-square" alt="Versión"></a>
   <img src="https://img.shields.io/badge/Minecraft-26.3-3dc75b?style=flat-square" alt="Minecraft 26.3">
   <img src="https://img.shields.io/badge/Java-25-e76f00?style=flat-square" alt="Java 25">
   <img src="https://img.shields.io/badge/licencia-MIT-4c8bf5?style=flat-square" alt="MIT">
@@ -36,7 +36,7 @@ La interfaz está pensada para no pedirte nada más que un nombre la primera vez
 
 | Componente | Versión |
 | --- | --- |
-| RustCraft | 0.1.1 |
+| RustCraft | 0.1.2 |
 | Horizon | `nightly` y releases compatibles |
 | Minecraft Java Edition | **26.3** |
 | Java runtime | **25** |
