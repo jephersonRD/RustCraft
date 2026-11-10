@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -223,19 +223,32 @@ pub fn prepare(
     });
 
     let mut killed = false;
+    let mut timed_out = false;
     let mut last_error = None;
     let mut last_stderr = String::new();
+    // A single exporter can be silent for a while, but ten minutes without a
+    // line means the helper hung. Stop it instead of leaving the launcher
+    // stuck forever on one percentage.
+    const STALL_LIMIT: Duration = Duration::from_secs(600);
+    let mut last_activity = Instant::now();
     loop {
         if cancel.load(Ordering::Relaxed) && !killed {
             let _ = child.kill();
             killed = true;
         }
+        if last_activity.elapsed() > STALL_LIMIT && !killed {
+            let _ = child.kill();
+            killed = true;
+            timed_out = true;
+        }
 
         match receiver.recv_timeout(Duration::from_millis(200)) {
             Ok(StreamEvent::Stdout(line)) => {
+                last_activity = Instant::now();
                 handle_stdout(&line, &mut progress, &mut last_error);
             }
             Ok(StreamEvent::Stderr(line)) => {
+                last_activity = Instant::now();
                 if !line.trim().is_empty() {
                     last_stderr = line.clone();
                     progress(Progress::Log(line));
@@ -251,6 +264,13 @@ pub fn prepare(
     })?;
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
+
+    if timed_out {
+        return Err(Error::Process(
+            "horizon-prepare dejó de responder durante 10 minutos; se detuvo. Pulsa Preparar para reintentar."
+                .into(),
+        ));
+    }
 
     if killed {
         return Err(Error::Cancelled);

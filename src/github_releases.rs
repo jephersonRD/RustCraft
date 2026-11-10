@@ -26,8 +26,6 @@ pub enum Platform {
     LinuxX86_64,
     WindowsX64,
     WindowsArm64,
-    MacosArm64,
-    MacosX64,
 }
 
 impl Platform {
@@ -36,8 +34,6 @@ impl Platform {
             ("linux", "x86_64") => Ok(Self::LinuxX86_64),
             ("windows", "x86_64") => Ok(Self::WindowsX64),
             ("windows", "aarch64") => Ok(Self::WindowsArm64),
-            ("macos", "aarch64") => Ok(Self::MacosArm64),
-            ("macos", "x86_64") => Ok(Self::MacosX64),
             (os, arch) => Err(Error::UnsupportedPlatform(format!("{os}-{arch}"))),
         }
     }
@@ -47,8 +43,6 @@ impl Platform {
             Self::LinuxX86_64 => "horizon-linux-x86_64.tar.gz",
             Self::WindowsX64 => "horizon-windows-x64.zip",
             Self::WindowsArm64 => "horizon-windows-arm64.zip",
-            Self::MacosArm64 => "horizon-macos-arm64.zip",
-            Self::MacosX64 => "horizon-macos-x64.zip",
         }
     }
 }
@@ -134,8 +128,6 @@ pub fn launcher_asset_name() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("rustcraft-linux-x86_64"),
         ("linux", "aarch64") => Some("rustcraft-linux-aarch64"),
-        ("macos", "aarch64") => Some("rustcraft-macos-arm64"),
-        ("macos", "x86_64") => Some("rustcraft-macos-x86_64"),
         ("windows", "x86_64") => Some("rustcraft-windows-x64.exe"),
         ("windows", "aarch64") => Some("rustcraft-windows-arm64.exe"),
         _ => None,
@@ -489,10 +481,6 @@ not-a-hash  ignored.bin
         assert_eq!(
             Platform::WindowsX64.asset_name(),
             "horizon-windows-x64.zip"
-        );
-        assert_eq!(
-            Platform::MacosArm64.asset_name(),
-            "horizon-macos-arm64.zip"
         );
     }
 

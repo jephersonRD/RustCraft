@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RustCraft installer for Linux and macOS.
+# RustCraft installer for Linux. Windows uses install.ps1.
 # Detects the OS, architecture and Linux distribution, then offers
 # install, update and uninstall actions through a small TUI.
 set -euo pipefail
@@ -339,7 +339,7 @@ EOF
 detect_os() {
     case "$(uname -s)" in
         Linux*) OS="linux" ;;
-        Darwin*) OS="macos" ;;
+        Darwin*) die "macOS ya no está soportado. Por ahora RustCraft funciona en Linux y Windows." ;;
         MINGW*|MSYS*|CYGWIN*) OS="windows" ;;
         *) die "sistema no soportado: $(uname -s)" ;;
     esac
@@ -394,8 +394,6 @@ resolve_asset() {
     case "$OS-$ARCH" in
         linux-x86_64) ASSET="rustcraft-linux-x86_64" ;;
         linux-aarch64) ASSET="rustcraft-linux-aarch64" ;;
-        macos-x86_64) ASSET="rustcraft-macos-x86_64" ;;
-        macos-aarch64) ASSET="rustcraft-macos-arm64" ;;
         *) ASSET="" ;;
     esac
 

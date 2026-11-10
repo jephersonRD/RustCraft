@@ -1,6 +1,6 @@
 [package]
 name = "rustcraft"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.85"
 description = "Offline launcher for Horizon, the Minecraft Java Edition rewrite in Rust"

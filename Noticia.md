@@ -1,10 +1,16 @@
 # Noticias de RustCraft
 
+## RustCraft 0.1.3: instala y juega sin esperas
+
+_9 de noviembre de 2026_
+
+Al descargar una versión de Horizon, RustCraft ahora descarga también Minecraft y prepara los recursos automáticamente, así que el botón Jugar funciona en cuanto termina la instalación. La biblioteca de versiones ya no se queda vacía en silencio: si GitHub no responde verás el error y podrás reintentar. La preparación vigila si el proceso deja de responder y lo detiene en vez de quedarse horas en el mismo porcentaje. Además, solo se admiten Linux y Windows; macOS llegará más adelante.
+
 ## RustCraft 0.1.2: instalador renovado
 
 _9 de noviembre de 2026_
 
-El instalador de Linux y macOS estrena una interfaz de terminal renovada: banner de RustCraft con degradado de color, menú en caja con iconos y opciones deshabilitadas según el estado de la instalación, barra de progreso con velocidad y bytes restantes, etapas con spinner y caja de resumen final. También corrige pequeños detalles del nombre de usuario en la esquina de la ventana.
+El instalador de Linux y Windows estrena una interfaz de terminal renovada: banner de RustCraft con degradado de color, menú en caja con iconos y opciones deshabilitadas según el estado de la instalación, barra de progreso con velocidad y bytes restantes, etapas con spinner y caja de resumen final. También corrige pequeños detalles del nombre de usuario en la esquina de la ventana.
 
 ## RustCraft 0.1.1: biblioteca completa y más animaciones
 

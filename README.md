@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jephersonRD/RustCraft/releases"><img src="https://img.shields.io/badge/versi%C3%B3n-0.1.2-f7c614?style=flat-square" alt="Versión"></a>
+  <a href="https://github.com/jephersonRD/RustCraft/releases"><img src="https://img.shields.io/badge/versi%C3%B3n-0.1.3-f7c614?style=flat-square" alt="Versión"></a>
   <img src="https://img.shields.io/badge/Minecraft-26.3-3dc75b?style=flat-square" alt="Minecraft 26.3">
   <img src="https://img.shields.io/badge/Java-25-e76f00?style=flat-square" alt="Java 25">
   <img src="https://img.shields.io/badge/licencia-MIT-4c8bf5?style=flat-square" alt="MIT">
@@ -23,8 +23,8 @@
 **RustCraft** es un lanzador de escritorio para [Horizon](https://github.com/horizon-rust/horizon), el motor de Minecraft Java Edition escrito en Rust. Se encarga de todo lo que hay entre tú y el juego:
 
 - Descarga y verifica la versión de Horizon que elijas.
-- Descarga los archivos oficiales de Minecraft desde Mojang y comprueba cada SHA-1.
-- Prepara los recursos del juego con `horizon-prepare` y Java 25.
+- Descarga los archivos oficiales de Minecraft desde Mojang y comprueba cada SHA-1, reintentando si la descarga llega corrupta.
+- Prepara los recursos del juego con `horizon-prepare` y Java 25 automáticamente al instalar, para que puedas jugar en cuanto termine.
 - Crea instancias independientes con sus propios mundos y ajustes.
 - Muestra todas las versiones de Horizon con su nombre, etiqueta, fecha y peso, y permite instalar o eliminar cada una por separado.
 - Avisa cuando hay una nueva versión de RustCraft y permite actualizar desde la propia app, o posponerlo y seguir jugando.
@@ -36,11 +36,11 @@ La interfaz está pensada para no pedirte nada más que un nombre la primera vez
 
 | Componente | Versión |
 | --- | --- |
-| RustCraft | 0.1.2 |
+| RustCraft | 0.1.3 |
 | Horizon | `nightly` y releases compatibles |
 | Minecraft Java Edition | **26.3** |
 | Java runtime | **25** |
-| Sistemas | Linux x86_64 · Windows x64/ARM64 · macOS Intel/Apple Silicon |
+| Sistemas | Linux x86_64 · Windows x64/ARM64 (macOS llegará más adelante) |
 
 > La versión de Minecraft la fija Horizon. RustCraft consulta su API de preparación y descarga exactamente los archivos que esa versión necesita.
 
@@ -52,7 +52,7 @@ Los scripts detectan el sistema operativo, la arquitectura y —en Linux— la d
 2. **Actualizar**
 3. **Desinstalar**
 
-### Linux y macOS
+### Linux y Windows
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jephersonRD/RustCraft/main/install.sh -o install.sh
@@ -146,7 +146,7 @@ Usa `--data-dir <DIR>` o la variable `RUSTCRAFT_DATA_DIR` para separar perfiles 
 | --- | --- |
 | Linux | `~/.local/share/RustCraft` |
 | Windows | `%APPDATA%\RustCraft` |
-| macOS | `~/Library/Application Support/RustCraft` |
+
 
 Dentro encontrarás `config.json`, las versiones de Horizon, los archivos de Minecraft, los recursos preparados y las instancias.
 

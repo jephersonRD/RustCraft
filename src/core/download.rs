@@ -17,6 +17,9 @@ pub fn client() -> Result<Client> {
     Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(30))
+        // A dead connection used to hang downloads forever. Fifteen minutes
+        // is enough for the biggest file even on a slow link.
+        .timeout(std::time::Duration::from_secs(15 * 60))
         .build()
         .map_err(Error::HttpClient)
 }
@@ -53,21 +56,48 @@ pub fn download(
     }
 
     let part = part_path(dest);
-    let result = download_to_part(client, url, &part, cancel, &mut progress);
 
-    match result {
-        Ok(()) => {}
-        Err(error) => {
+    // A flaky connection occasionally delivers a body that does not match the
+    // published checksum. Retry a couple of times before giving up.
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        match download_to_part(client, url, &part, cancel, &mut progress) {
+            Ok(()) => match checksum {
+                Some(check) => match check.verify(&part) {
+                    Ok(()) => break,
+                    Err(error) => {
+                        let _ = fs::remove_file(&part);
+                        last_error = Some(error);
+                        if attempt < 3 {
+                            progress(0, None);
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                        }
+                    }
+                },
+                None => break,
+            },
+            Err(error) => {
+                let _ = fs::remove_file(&part);
+                let cancelled = matches!(error, Error::Cancelled);
+                last_error = Some(error);
+                if cancelled || attempt == 3 {
+                    return Err(last_error.unwrap_or_else(|| {
+                        Error::Process("download failed".into())
+                    }));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+        if cancel.load(Ordering::Relaxed) {
             let _ = fs::remove_file(&part);
-            return Err(error);
+            return Err(Error::Cancelled);
         }
     }
 
-    if let Some(check) = checksum {
-        if let Err(error) = check.verify(&part) {
-            let _ = fs::remove_file(&part);
-            return Err(error);
-        }
+    if !part.is_file() {
+        return Err(last_error.unwrap_or_else(|| {
+            Error::Process(format!("could not download {url}"))
+        }));
     }
 
     if dest.exists() {

@@ -67,6 +67,7 @@ enum Msg {
     Progress(f32),
     Bytes { label: String, downloaded: u64, total: u64 },
     Remote(Vec<Release>),
+    RemoteErr(String),
     News(Vec<NewsItem>),
     Update(Option<Release>),
     Done(std::result::Result<String, String>),
@@ -91,6 +92,8 @@ pub struct RustCraftApp {
     version_sizes: std::collections::HashMap<String, u64>,
     instances: Vec<Instance>,
     remote: Vec<Release>,
+    remote_error: Option<String>,
+    remote_loading: bool,
     news: Vec<NewsItem>,
     latest_release: Option<Release>,
     bytes_note: Option<String>,
@@ -156,6 +159,8 @@ impl RustCraftApp {
             version_sizes: std::collections::HashMap::new(),
             instances: Vec::new(),
             remote: Vec::new(),
+            remote_error: None,
+            remote_loading: false,
             news: Vec::new(),
             latest_release: None,
             bytes_note: None,
@@ -248,6 +253,13 @@ impl RustCraftApp {
                 Msg::Remote(releases) => {
                     self.latest_release = releases.first().cloned();
                     self.remote = releases;
+                    self.remote_error = None;
+                    self.remote_loading = false;
+                }
+                Msg::RemoteErr(error) => {
+                    self.remote_error = Some(error.clone());
+                    self.remote_loading = false;
+                    self.log(format!("versiones: {error}"));
                 }
                 Msg::News(items) => {
                     self.news = items;
@@ -268,6 +280,13 @@ impl RustCraftApp {
                             ..
                         })
                     );
+                    let installed_tag = match self.task.as_ref() {
+                        Some(Task {
+                            kind: TaskKind::Install(tag),
+                            ..
+                        }) => Some(tag.clone()),
+                        _ => None,
+                    };
                     let ok = result.is_ok();
                     match result {
                         Ok(message) => {
@@ -283,6 +302,20 @@ impl RustCraftApp {
                         self.available_update = None;
                         self.update_dialog = false;
                         self.update_dismissed = true;
+                    }
+                    if let (Some(tag), true) = (installed_tag, ok) {
+                        self.config.selected_version = Some(tag.clone());
+                        let _ = self.config.save(&self.paths.config_file());
+                        if self.selected_instance.is_none() {
+                            if let Ok(instance) =
+                                instances::ensure_default(&self.paths, &tag)
+                            {
+                                self.selected_instance = Some(instance.id.clone());
+                                self.config.selected_instance =
+                                    Some(instance.id.clone());
+                                let _ = self.config.save(&self.paths.config_file());
+                            }
+                        }
                     }
                     self.bytes_note = None;
                     self.task = None;
@@ -313,16 +346,27 @@ impl RustCraftApp {
             match client {
                 Ok(client) => {
                     if let Ok(release) = github_releases::latest_launcher_release(&client) {
-                        if github_releases::version_is_newer(
-                            env!("CARGO_PKG_VERSION"),
-                            &release.tag_name,
-                        ) {
+                        let has_binary = github_releases::launcher_asset_name()
+                            .is_some_and(|name| release.asset(name).is_some());
+                        if has_binary
+                            && github_releases::version_is_newer(
+                                env!("CARGO_PKG_VERSION"),
+                                &release.tag_name,
+                            )
+                        {
                             let _ = tx.send(Msg::Update(Some(release)));
                         }
                     }
-                    let releases =
-                        github_releases::list_releases(&client, 500).unwrap_or_default();
-                    let _ = tx.send(Msg::Remote(releases));
+                    match github_releases::list_releases(&client, 100) {
+                        Ok(releases) => {
+                            let _ = tx.send(Msg::Remote(releases));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(Msg::RemoteErr(format!(
+                                "no se pudo consultar GitHub: {error}"
+                            )));
+                        }
+                    }
                     match download::fetch_text(&client, NEWS_URL) {
                         Ok(text) => {
                             let _ = tx.send(Msg::News(parse_news(&text)));
@@ -334,6 +378,9 @@ impl RustCraftApp {
                 }
                 Err(error) => {
                     let _ = tx.send(Msg::Log(format!("error: {error}")));
+                    let _ = tx.send(Msg::RemoteErr(format!(
+                        "no se pudo conectar con GitHub: {error}"
+                    )));
                     let _ = tx.send(Msg::Done(Err(format!("{error}"))));
                     ctx.request_repaint();
                     return;
@@ -347,6 +394,8 @@ impl RustCraftApp {
             rx,
         });
         self.status = "consultando versiones y noticias".into();
+        self.remote_loading = true;
+        self.remote_error = None;
     }
 
     fn spawn_install(&mut self, ctx: &egui::Context, tag: String) {
@@ -357,6 +406,7 @@ impl RustCraftApp {
         let paths = self.paths.clone();
         let ctx = ctx.clone();
         let thread_tag = tag.clone();
+        let java_home = self.config.java_home.clone();
         std::thread::spawn(move || {
             let result = (|| -> RcResult<InstallResult> {
                 let client = download::client()?;
@@ -389,11 +439,29 @@ impl RustCraftApp {
                 )
             })();
             let _ = match result {
-                Ok(result) => tx.send(Msg::Done(Ok(format!(
-                    "Horizon {} listo en {}",
-                    result.meta.tag,
-                    result.path.display()
-                )))),
+                Ok(result) => {
+                    let _ = tx.send(Msg::Log(format!(
+                        "Horizon {} descargado; preparando recursos",
+                        result.meta.tag
+                    )));
+                    match prepare_version(
+                        &paths,
+                        &thread_tag,
+                        java_home.as_deref(),
+                        &tx,
+                        &ctx,
+                    ) {
+                        Ok(prepared) => tx.send(Msg::Done(Ok(format!(
+                            "Horizon {} listo para jugar ({})",
+                            result.meta.tag,
+                            prepared.output.display()
+                        )))),
+                        Err(error) => tx.send(Msg::Done(Err(format!(
+                            "Horizon {} quedó instalado, pero la preparación falló: {error}. Pulsa Preparar en Biblioteca para reintentar.",
+                            result.meta.tag
+                        )))),
+                    }
+                }
                 Err(error) => tx.send(Msg::Done(Err(format!("{error}")))),
             };
             ctx.request_repaint();
@@ -403,7 +471,9 @@ impl RustCraftApp {
             rx,
         });
         self.progress = Some(0.0);
-        self.status = format!("instalando Horizon {tag}");
+        self.status = format!("instalando y preparando Horizon {tag}");
+        self.logs.clear();
+        self.log("la descarga incluye Minecraft y la preparación de recursos".into());
         self.bytes_note = None;
         self.logs.clear();
     }
@@ -1519,13 +1589,23 @@ impl RustCraftApp {
             Pos2::new(remote_rect.max.x - 120.0, remote_rect.min.y + 11.0),
             Vec2::new(104.0, 30.0),
         );
+        let busy = self.busy();
+        let label = if self.remote_loading {
+            "Consultando…"
+        } else {
+            "Actualizar"
+        };
         let refresh = ui.put(
             refresh_rect,
-            egui::Button::new(RichText::new("Actualizar").size(13.0).color(YELLOW))
-                .fill(CARD_SOFT)
-                .corner_radius(9.0),
+            egui::Button::new(
+                RichText::new(label)
+                    .size(13.0)
+                    .color(if busy { MUTED } else { YELLOW }),
+            )
+            .fill(CARD_SOFT)
+            .corner_radius(9.0),
         );
-        if refresh.clicked() {
+        if refresh.clicked() && !busy {
             self.spawn_releases(ui.ctx());
         }
 
@@ -1676,12 +1756,22 @@ impl RustCraftApp {
                 ui.set_width(rect.width());
                 if self.remote.is_empty() {
                     ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(
-                            "Pulsa Actualizar para consultar las versiones de horizon-rust/horizon.",
+                    let (text, color) = if let Some(error) = &self.remote_error {
+                        (
+                            format!("{error}\n\nComprueba tu conexión y pulsa Actualizar."),
+                            RED,
                         )
-                        .size(14.0)
-                        .color(MUTED),
+                    } else if self.remote_loading {
+                        ("Consultando versiones de GitHub…".to_owned(), MUTED)
+                    } else {
+                        (
+                            "Pulsa Actualizar para consultar las versiones de horizon-rust/horizon."
+                                .to_owned(),
+                            MUTED,
+                        )
+                    };
+                    ui.add(
+                        egui::Label::new(RichText::new(text).size(14.0).color(color)).wrap(),
                     );
                     return;
                 }
